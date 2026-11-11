@@ -117,4 +117,4 @@ Bloop is intentionally small, so it is a good first Rust and GTK project. See CO
 
 ## License
 
-MIT. See LICENSE.
+License: [MIT](LICENSE).
