@@ -5,6 +5,10 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
+ashpd = { version = "0.14.3", default-features = false, features = [
+    "screencast",
+    "async-io",
+] }
 cairo-rs = "0.22"
 gtk4 = "0.11"
 serde = { version = "1", features = ["derive"] }
