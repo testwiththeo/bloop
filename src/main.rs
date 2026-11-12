@@ -1,6 +1,7 @@
 mod annotation;
 mod capture;
 mod export;
+mod pipeline;
 mod project;
 mod ui;
 
