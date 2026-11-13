@@ -1,6 +1,4 @@
 // Portal session setup for XDG ScreenCast.
-// Remove this allow once ui.rs calls into this module.
-#![allow(dead_code)]
 //
 // Flow mirrors Kooha, the reference ScreenCast implementation:
 // src/screencast_portal/mod.rs — create_session sends handle_token +
@@ -14,11 +12,13 @@
 // Screencast::new -> create_session -> select_sources -> start ->
 // Streams -> open_pipe_wire_remote; Session::close ends it.
 
+use crate::pipeline::{Pipeline, PipelineError};
 use ashpd::desktop::screencast::{
     CursorMode, OpenPipeWireRemoteOptions, Screencast, SelectSourcesOptions, SourceType,
     StartCastOptions,
 };
 use ashpd::desktop::{CreateSessionOptions, PersistMode, ResponseError, Session};
+use gtk4::glib::MainContext;
 use std::os::fd::OwnedFd;
 
 #[derive(Debug)]
@@ -27,6 +27,7 @@ pub enum CaptureError {
     Cancelled,
     NoStream,
     Portal(ashpd::Error),
+    Pipeline(PipelineError),
 }
 
 impl std::fmt::Display for CaptureError {
@@ -35,6 +36,7 @@ impl std::fmt::Display for CaptureError {
             Self::Cancelled => write!(f, "user cancelled the portal dialog"),
             Self::NoStream => write!(f, "portal returned no PipeWire stream"),
             Self::Portal(e) => write!(f, "portal error: {e}"),
+            Self::Pipeline(e) => write!(f, "pipeline error: {e}"),
         }
     }
 }
@@ -115,6 +117,77 @@ async fn start_portal_session_with<B: PortalBackend>(
         Err(e) => {
             let _ = backend.close_session(&session).await;
             Err(e)
+        }
+    }
+}
+
+/// A recording in progress: the live portal session and the running
+/// GStreamer pipeline fed by its PipeWire remote. Both halves must be
+/// kept and stopped together, so they live in one struct.
+pub struct Recording<B: PortalBackend, P> {
+    session: PortalSession<B>,
+    pipeline: P,
+}
+
+/// Anything that can be shut down before the portal session closes;
+/// pipeline::Pipeline implements it via Pipeline::stop. The trait is
+/// the test seam so a mock pipeline can record its stop call.
+pub trait Stoppable {
+    fn stop(&self) -> Result<(), PipelineError>;
+}
+
+impl Stoppable for Pipeline {
+    fn stop(&self) -> Result<(), PipelineError> {
+        Pipeline::stop(self)
+    }
+}
+
+impl<B: PortalBackend, P> Recording<B, P> {
+    pub fn session(&self) -> &PortalSession<B> {
+        &self.session
+    }
+
+    pub fn pipeline(&self) -> &P {
+        &self.pipeline
+    }
+}
+
+impl<B: PortalBackend, P: Stoppable> Recording<B, P> {
+    /// Stops the GStreamer pipeline first so PipeWire disconnects, then
+    /// closes the portal session (Kooha tears down its encoder before
+    /// Session::close). A pipeline failure does not skip the close.
+    pub fn stop(self) -> Result<(), CaptureError> {
+        let pipeline_result = self.pipeline.stop().map_err(CaptureError::Pipeline);
+        let close_result = MainContext::default().block_on(self.session.close());
+        pipeline_result.and(close_result)
+    }
+}
+
+/// Runs the portal handshake, then starts the pipewiresrc pipeline on
+/// the returned fd and node id. This is the Kooha screencast flow's
+/// second half: screencast_portal hands the remote fd + stream node id
+/// to src/pipeline.rs make_pipewiresrc.
+pub async fn start_recording() -> Result<Recording<AshpdPortal, Pipeline>, CaptureError> {
+    let session = start_portal_session().await?;
+    match crate::pipeline::start_pipeline(session.pipewire_fd(), session.pipewire_node_id()) {
+        Ok(pipeline) => Ok(Recording { session, pipeline }),
+        Err(e) => {
+            let _ = session.close().await;
+            Err(CaptureError::Pipeline(e))
+        }
+    }
+}
+
+async fn start_recording_with<B: PortalBackend, P>(
+    backend: B,
+    start_pipeline: impl FnOnce(&OwnedFd, u32) -> Result<P, PipelineError>,
+) -> Result<Recording<B, P>, CaptureError> {
+    let session = start_portal_session_with(backend).await?;
+    match start_pipeline(session.pipewire_fd(), session.pipewire_node_id()) {
+        Ok(pipeline) => Ok(Recording { session, pipeline }),
+        Err(e) => {
+            let _ = session.close().await;
+            Err(CaptureError::Pipeline(e))
         }
     }
 }
@@ -295,6 +368,114 @@ mod tests {
         };
         let result = block_on(start_portal_session_with(mock));
         assert!(matches!(result, Err(CaptureError::NoStream)));
+        assert_eq!(calls.borrow().last().copied(), Some("close"));
+    }
+
+    struct MockPipeline {
+        fd_seen: i32,
+        node_seen: u32,
+    }
+
+    #[test]
+    fn recording_passes_fd_and_node_id_to_pipeline() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mock = MockPortal {
+            calls: calls.clone(),
+            fail_at: None,
+        };
+        let recording = block_on(start_recording_with(mock, |fd, node_id| {
+            Ok(MockPipeline {
+                fd_seen: fd.as_raw_fd(),
+                node_seen: node_id,
+            })
+        }))
+        .unwrap();
+        assert_eq!(recording.pipeline().node_seen, 42);
+        assert_eq!(
+            recording.pipeline().fd_seen,
+            recording.session().pipewire_fd().as_raw_fd()
+        );
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "create_session",
+                "select_sources",
+                "start",
+                "open_pipe_wire_remote"
+            ]
+        );
+    }
+
+    #[test]
+    fn pipeline_failure_closes_the_session() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mock = MockPortal {
+            calls: calls.clone(),
+            fail_at: None,
+        };
+        let result: Result<Recording<MockPortal, MockPipeline>, _> =
+            block_on(start_recording_with(mock, |_, _| {
+                Err(PipelineError::MissingCaps)
+            }));
+        assert!(matches!(result, Err(CaptureError::Pipeline(_))));
+        assert_eq!(calls.borrow().last().copied(), Some("close"));
+    }
+
+    struct LoggedPipeline {
+        log: Rc<RefCell<Vec<&'static str>>>,
+        fail_stop: bool,
+    }
+
+    impl Stoppable for LoggedPipeline {
+        fn stop(&self) -> Result<(), PipelineError> {
+            self.log.borrow_mut().push("pipeline_stop");
+            if self.fail_stop {
+                return Err(PipelineError::MissingCaps);
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn stop_halts_pipeline_before_closing_session() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mock = MockPortal {
+            calls: calls.clone(),
+            fail_at: None,
+        };
+        let pipeline = LoggedPipeline {
+            log: calls.clone(),
+            fail_stop: false,
+        };
+        let recording = block_on(start_recording_with(mock, |_, _| Ok(pipeline))).unwrap();
+        recording.stop().unwrap();
+        assert_eq!(
+            calls.borrow().as_slice(),
+            [
+                "create_session",
+                "select_sources",
+                "start",
+                "open_pipe_wire_remote",
+                "pipeline_stop",
+                "close"
+            ]
+        );
+    }
+
+    #[test]
+    fn stop_after_pipeline_failure_still_closes_session() {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let mock = MockPortal {
+            calls: calls.clone(),
+            fail_at: None,
+        };
+        let pipeline = LoggedPipeline {
+            log: calls.clone(),
+            fail_stop: true,
+        };
+        let recording = block_on(start_recording_with(mock, |_, _| Ok(pipeline))).unwrap();
+        let result = recording.stop();
+        assert!(matches!(result, Err(CaptureError::Pipeline(_))));
         assert_eq!(calls.borrow().last().copied(), Some("close"));
     }
 }
