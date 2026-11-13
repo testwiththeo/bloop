@@ -5,23 +5,12 @@ mod pipeline;
 mod project;
 mod ui;
 
-use gtk4::prelude::*;
-use gtk4::{Application, ApplicationWindow};
+use adw::prelude::*;
 
 const APP_ID: &str = "io.github.open-qa-tools.Bloop";
 
 fn main() -> gtk4::glib::ExitCode {
-    let app = Application::builder().application_id(APP_ID).build();
-    app.connect_activate(build_main_window);
+    let app = adw::Application::builder().application_id(APP_ID).build();
+    app.connect_activate(|app| ui::build_main_window(app).present());
     app.run()
-}
-
-fn build_main_window(app: &Application) {
-    let window = ApplicationWindow::builder()
-        .application(app)
-        .title("Bloop")
-        .default_width(800)
-        .default_height(600)
-        .build();
-    window.present();
 }
