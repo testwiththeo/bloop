@@ -3,8 +3,10 @@
 // No annotation editor, no export dialog yet.
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::time::Duration;
 
 use adw::prelude::*;
+use cairo::ImageSurface;
 
 use crate::capture::{self, AshpdPortal, Recording};
 use crate::pipeline::Pipeline;
@@ -20,12 +22,12 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     let stop_button = gtk4::Button::with_label("Stop");
     stop_button.set_sensitive(false);
 
-    let preview = gtk4::Frame::new(Some("Preview"));
-    let preview_label = gtk4::Label::new(Some("Screen preview appears here"));
-    preview_label.set_hexpand(true);
-    preview_label.set_vexpand(true);
-    preview.set_child(Some(&preview_label));
+    let preview = gtk4::Picture::new();
+    preview.set_hexpand(true);
     preview.set_vexpand(true);
+    let preview_frame = gtk4::Frame::new(Some("Preview"));
+    preview_frame.set_child(Some(&preview));
+    preview_frame.set_vexpand(true);
 
     let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     controls.set_halign(gtk4::Align::Center);
@@ -37,7 +39,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     content.set_margin_bottom(12);
     content.set_margin_start(12);
     content.set_margin_end(12);
-    content.append(&preview);
+    content.append(&preview_frame);
     content.append(&controls);
 
     let toolbar_view = adw::ToolbarView::new();
@@ -53,14 +55,19 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     window.set_content(Some(&toolbar_view));
 
     let recording: Rc<RefCell<Option<ActiveRecording>>> = Rc::new(RefCell::new(None));
+    let timer_id: Rc<RefCell<Option<gtk4::glib::SourceId>>> = Rc::new(RefCell::new(None));
 
     record_button.connect_clicked({
         let recording = recording.clone();
+        let timer_id = timer_id.clone();
+        let preview = preview.clone();
         let record_button = record_button.clone();
         let stop_button = stop_button.clone();
         move |_| {
             record_button.set_sensitive(false);
             let recording = recording.clone();
+            let timer_id = timer_id.clone();
+            let preview = preview.clone();
             let record_button = record_button.clone();
             let stop_button = stop_button.clone();
             gtk4::glib::MainContext::default().spawn_local(async move {
@@ -68,6 +75,25 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                     Ok(active) => {
                         *recording.borrow_mut() = Some(active);
                         stop_button.set_sensitive(true);
+                        let source_id = gtk4::glib::timeout_add_local(Duration::from_millis(33), {
+                            let recording = recording.clone();
+                            let preview = preview.clone();
+                            move || {
+                                // None or Err keeps the last frame
+                                // and continues until Stop.
+                                let next = recording
+                                    .borrow()
+                                    .as_ref()
+                                    .and_then(|active| active.pipeline().next_frame());
+                                if let Some(Ok((_, surface))) = next {
+                                    if let Some(texture) = surface_to_texture(&surface) {
+                                        preview.set_paintable(Some(&texture));
+                                    }
+                                }
+                                gtk4::glib::ControlFlow::Continue
+                            }
+                        });
+                        *timer_id.borrow_mut() = Some(source_id);
                     }
                     Err(e) => {
                         eprintln!("recording failed: {e}");
@@ -80,22 +106,60 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
 
     stop_button.connect_clicked({
         let recording = recording.clone();
+        let timer_id = timer_id.clone();
         let record_button = record_button.clone();
         move |button| {
             button.set_sensitive(false);
+            if let Some(source_id) = timer_id.borrow_mut().take() {
+                source_id.remove();
+            }
             if let Some(active) = recording.borrow_mut().take() {
-                // Sets the pipeline to Null so PipeWire disconnects;
-                // dropping the session closes the remote fd. Portal
-                // Session::close needs a Recording::stop in capture.rs
-                // (it consumes the session, which Recording keeps
-                // private) — follow-up task.
-                let _ = active.pipeline().stop();
+                // Pipeline first, then Session::close — see
+                // Recording::stop in capture.rs.
+                if let Err(e) = active.stop() {
+                    eprintln!("stop failed: {e}");
+                }
             }
             record_button.set_sensitive(true);
         }
     });
 
     window
+}
+
+/// Uploads a cairo frame to a texture for the preview Picture.
+/// gdk::MemoryTexture::new copies raw pixel rows with an explicit
+/// format and stride (docs.rs gtk4 gdk::MemoryTexture::new). cairo
+/// Format::ARgb32 is premultiplied native-endian ARGB — B,G,R,A byte
+/// order on little-endian — which is MemoryFormat::B8g8r8a8Premultiplied
+/// (cairo-rs Format docs; gdk4 MemoryFormat docs). flush() is required
+/// by cairo before reading surface data outside cairo (cairo_surface_
+/// flush); with_data gives a shared borrow of the pixels (cairo-rs
+/// ImageSurface::with_data).
+fn surface_to_texture(surface: &ImageSurface) -> Option<gtk4::gdk::Texture> {
+    let width = surface.width();
+    let height = surface.height();
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    surface.flush();
+    let mut data = Vec::new();
+    surface.with_data(|d| data = d.to_vec()).ok()?;
+    let stride = surface.stride() as usize;
+    if data.len() < stride * height as usize {
+        return None;
+    }
+    let bytes = gtk4::glib::Bytes::from_owned(data);
+    Some(
+        gtk4::gdk::MemoryTexture::new(
+            width,
+            height,
+            gtk4::gdk::MemoryFormat::B8g8r8a8Premultiplied,
+            &bytes,
+            stride,
+        )
+        .upcast(),
+    )
 }
 
 #[cfg(test)]
