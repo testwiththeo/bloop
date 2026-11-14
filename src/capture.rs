@@ -143,6 +143,8 @@ impl Stoppable for Pipeline {
 }
 
 impl<B: PortalBackend, P> Recording<B, P> {
+    /// Test seam: the fd/node assertions live in this file's tests.
+    #[cfg(test)]
     pub fn session(&self) -> &PortalSession<B> {
         &self.session
     }
@@ -156,9 +158,13 @@ impl<B: PortalBackend, P: Stoppable> Recording<B, P> {
     /// Stops the GStreamer pipeline first so PipeWire disconnects, then
     /// closes the portal session (Kooha tears down its encoder before
     /// Session::close). A pipeline failure does not skip the close.
+    /// Session::close is async; it is driven on a dedicated context —
+    /// block_on acquires its context, and the default context is
+    /// already owned by the UI main loop (or other tests in parallel),
+    /// which glib refuses with "already acquired by another thread".
     pub fn stop(self) -> Result<(), CaptureError> {
         let pipeline_result = self.pipeline.stop().map_err(CaptureError::Pipeline);
-        let close_result = MainContext::default().block_on(self.session.close());
+        let close_result = MainContext::new().block_on(self.session.close());
         pipeline_result.and(close_result)
     }
 }
@@ -178,6 +184,7 @@ pub async fn start_recording() -> Result<Recording<AshpdPortal, Pipeline>, Captu
     }
 }
 
+#[cfg(test)]
 async fn start_recording_with<B: PortalBackend, P>(
     backend: B,
     start_pipeline: impl FnOnce(&OwnedFd, u32) -> Result<P, PipelineError>,
