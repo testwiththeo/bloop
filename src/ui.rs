@@ -21,7 +21,6 @@ const TOOL_THICKNESS: f64 = 3.0;
 const TEXT_COLOR: &str = "#FFFFFF";
 const TEXT_FONT_SIZE: u32 = 14;
 const BLUR_RADIUS: u32 = 12;
-const HIGHLIGHT_COLOR: &str = "#FFFF00";
 const HIGHLIGHT_OPACITY: f64 = 0.4;
 const MAX_FRAMES: usize = 600;
 
@@ -62,6 +61,17 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     let tool_select =
         gtk4::DropDown::from_strings(&["Rectangle", "Arrow", "Text", "Blur", "Highlight"]);
     tools_row.append(&tool_select);
+    // Annotation color/thickness pickers; defaults match the old
+    // hardcoded values so untouched behavior is identical.
+    let color_button = gtk4::ColorButton::new();
+    if let Ok(rgba) = gtk4::gdk::RGBA::parse(TOOL_COLOR) {
+        color_button.set_rgba(&rgba);
+    }
+    tools_row.append(&color_button);
+    tools_row.append(&gtk4::Label::new(Some("Thickness")));
+    let thickness_spin = gtk4::SpinButton::with_range(1.0, 10.0, 1.0);
+    thickness_spin.set_value(TOOL_THICKNESS);
+    tools_row.append(&thickness_spin);
     let clear_button = gtk4::Button::with_label("Clear");
     tools_row.append(&clear_button);
     let save_button = gtk4::Button::with_label("Save Project");
@@ -135,6 +145,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let drag_start = drag_start.clone();
         let drag_now = drag_now.clone();
         let tool_select = tool_select.clone();
+        let color_button = color_button.clone();
+        let thickness_spin = thickness_spin.clone();
         move |_, cr, w, h| {
             let widget = (f64::from(w), f64::from(h));
             let frame = effective_frame_size(frame_size.get(), widget);
@@ -196,13 +208,16 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 }
             }
             if let (Some((sx, sy)), Some((ex, ey))) = (drag_start.get(), drag_now.get()) {
+                // Live shapes preview the committed picker values.
+                let tool_color = picker_hex(&color_button);
+                let thickness = thickness_spin.value();
                 match tool_select.selected() {
-                    1 => stroke_arrow(cr, TOOL_COLOR, TOOL_THICKNESS, 0.7, (sx, sy), (ex, ey)),
+                    1 => stroke_arrow(cr, &tool_color, thickness, 0.7, (sx, sy), (ex, ey)),
                     // Text has no live shape; the dialog appears on click.
                     0 => stroke_box(
                         cr,
-                        TOOL_COLOR,
-                        TOOL_THICKNESS,
+                        &tool_color,
+                        thickness,
                         0.7,
                         (sx.min(ex), sy.min(ey), (ex - sx).abs(), (ey - sy).abs()),
                     ),
@@ -213,7 +228,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                     ),
                     4 => fill_tinted_rect(
                         cr,
-                        HIGHLIGHT_COLOR,
+                        &tool_color,
                         0.7,
                         (sx.min(ex), sy.min(ey), (ex - sx).abs(), (ey - sy).abs()),
                     ),
@@ -253,6 +268,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let tool_select = tool_select.clone();
         let canvas = canvas.clone();
         let window = window.clone();
+        let color_button = color_button.clone();
+        let thickness_spin = thickness_spin.clone();
         move |_, ox, oy| {
             if let Some((sx, sy)) = drag_start.get() {
                 let (ex, ey) = (sx + ox, sy + oy);
@@ -263,8 +280,10 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 // land on the frame edge, not a saturated u32.
                 let (x1, y1) = widget_to_frame(sx, sy, content, frame);
                 let (x2, y2) = widget_to_frame(ex, ey, content, frame);
+                let tool_color = picker_hex(&color_button);
+                let thickness = thickness_spin.value() as u8;
                 if tool_select.selected() == 2 {
-                    prompt_for_text(&window, x1, y1, &annotations, &canvas);
+                    prompt_for_text(&window, x1, y1, &annotations, &canvas, &tool_color);
                 } else if tool_select.selected() == 1 {
                     // Tail + tip points — any drag direction is valid.
                     if x1 != x2 || y1 != y2 {
@@ -273,8 +292,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                             y: y1,
                             tip_x: x2,
                             tip_y: y2,
-                            color: TOOL_COLOR.to_string(),
-                            thickness: TOOL_THICKNESS as u8,
+                            color: tool_color,
+                            thickness,
                             start_ms: 0,
                             end_ms: u64::MAX,
                         }));
@@ -304,7 +323,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                                 y,
                                 width: w,
                                 height: h,
-                                color: HIGHLIGHT_COLOR.to_string(),
+                                color: tool_color.clone(),
                                 opacity: HIGHLIGHT_OPACITY,
                                 start_ms: 0,
                                 end_ms: u64::MAX,
@@ -323,8 +342,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                                 y,
                                 width: w,
                                 height: h,
-                                color: TOOL_COLOR.to_string(),
-                                thickness: TOOL_THICKNESS as u8,
+                                color: tool_color,
+                                thickness,
                                 start_ms: 0,
                                 end_ms: u64::MAX,
                             }));
@@ -708,6 +727,18 @@ fn effective_frame_size(frame: (f64, f64), widget: (f64, f64)) -> (f64, f64) {
     }
 }
 
+/// The ColorButton's current color as "#RRGGBB" — the hex form all
+/// annotation types store and parse_hex_color accepts.
+fn picker_hex(button: &gtk4::ColorButton) -> String {
+    let c = button.rgba();
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        (f64::from(c.red()) * 255.0).round() as u8,
+        (f64::from(c.green()) * 255.0).round() as u8,
+        (f64::from(c.blue()) * 255.0).round() as u8
+    )
+}
+
 /// Opens the small text dialog: an Entry with OK and Cancel. On OK with
 /// non-empty text, a Text annotation is pushed at the clicked frame
 /// coordinates. gtk4::Dialog is deprecated in GTK 4.10+ but its
@@ -719,6 +750,7 @@ fn prompt_for_text(
     y: u32,
     annotations: &Rc<RefCell<Vec<Annotation>>>,
     canvas: &gtk4::DrawingArea,
+    background: &str,
 ) {
     let dialog = gtk4::Dialog::with_buttons(
         Some("Add text"),
@@ -737,6 +769,7 @@ fn prompt_for_text(
     dialog.connect_response({
         let annotations = annotations.clone();
         let canvas = canvas.clone();
+        let background = background.to_string();
         move |d, response| {
             let text = entry.text().to_string();
             if response == gtk4::ResponseType::Accept && !text.is_empty() {
@@ -745,7 +778,7 @@ fn prompt_for_text(
                     y,
                     text,
                     color: TEXT_COLOR.to_string(),
-                    background: TOOL_COLOR.to_string(),
+                    background: background.clone(),
                     font_size: TEXT_FONT_SIZE,
                     start_ms: 0,
                     end_ms: u64::MAX,
