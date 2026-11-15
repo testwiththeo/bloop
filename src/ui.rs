@@ -13,6 +13,7 @@ use crate::annotation::{Annotation, Arrow, Blur, BoxAnnotation, Highlight, Text}
 use crate::capture::{self, AshpdPortal, Recording};
 use crate::export;
 use crate::pipeline::Pipeline;
+use crate::project::{Project, FORMAT_VERSION};
 
 const WINDOW_TITLE: &str = "Bloop";
 const TOOL_COLOR: &str = "#FF0000";
@@ -63,6 +64,10 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     tools_row.append(&tool_select);
     let clear_button = gtk4::Button::with_label("Clear");
     tools_row.append(&clear_button);
+    let save_button = gtk4::Button::with_label("Save Project");
+    tools_row.append(&save_button);
+    let load_button = gtk4::Button::with_label("Load Project");
+    tools_row.append(&load_button);
 
     let transport_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     transport_row.set_halign(gtk4::Align::Center);
@@ -450,6 +455,12 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let annotations = annotations.clone();
         let window = window.clone();
         let export_button = export_button.clone();
+        // Cloned here so the move closure owns copies and the
+        // originals stay usable by the save/load handlers.
+        let fps_spin = fps_spin.clone();
+        let scale_spin = scale_spin.clone();
+        let trim_start = trim_start.clone();
+        let trim_end = trim_end.clone();
         move |_| {
             // FileChooserDialog (FileChooserExt::file/set_action/
             // set_current_name, docs.rs gtk4). Deprecated markers on
@@ -513,6 +524,121 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                                     Err(e) => eprintln!("write failed: {e}"),
                                 },
                                 Err(e) => eprintln!("encode failed: {e}"),
+                            }
+                        }
+                    }
+                    dialog.close();
+                }
+            });
+            dialog.present();
+        }
+    });
+
+    save_button.connect_clicked({
+        let annotations = annotations.clone();
+        let frame_size = frame_size.clone();
+        let canvas = canvas.clone();
+        let window = window.clone();
+        let fps_spin = fps_spin.clone();
+        let trim_start = trim_start.clone();
+        let trim_end = trim_end.clone();
+        move |_| {
+            let dialog = gtk4::FileChooserDialog::new(
+                Some("Save Project"),
+                Some(&window),
+                gtk4::FileChooserAction::Save,
+                &[
+                    ("Cancel", gtk4::ResponseType::Cancel),
+                    ("Save", gtk4::ResponseType::Accept),
+                ],
+            );
+            dialog.set_current_name("bloop.bloop.json");
+            dialog.connect_response({
+                let annotations = annotations.clone();
+                let frame_size = frame_size.clone();
+                let canvas = canvas.clone();
+                let fps_spin = fps_spin.clone();
+                let trim_start = trim_start.clone();
+                let trim_end = trim_end.clone();
+                move |dialog, response| {
+                    if response == gtk4::ResponseType::Accept {
+                        if let Some(path) = dialog.file().and_then(|f| f.path()) {
+                            // Recording bounds come from the current
+                            // frame size (canvas size before the first
+                            // frame, same fallback as the canvas math).
+                            let widget = (f64::from(canvas.width()), f64::from(canvas.height()));
+                            let (w, h) = effective_frame_size(frame_size.get(), widget);
+                            let end_raw = trim_end.value() as u64;
+                            let project = Project {
+                                version: FORMAT_VERSION.to_string(),
+                                width: w.max(1.0) as u32,
+                                height: h.max(1.0) as u32,
+                                fps: fps_spin.value() as u32,
+                                trim_start_ms: trim_start.value() as u64,
+                                // UI 0 means "to the last frame" — None.
+                                trim_end_ms: (end_raw > 0).then_some(end_raw),
+                                annotations: annotations.borrow().clone(),
+                            };
+                            match project.save(&path) {
+                                Ok(()) => eprintln!("saved project to {}", path.display()),
+                                Err(e) => eprintln!("project save failed: {e}"),
+                            }
+                        }
+                    }
+                    dialog.close();
+                }
+            });
+            dialog.present();
+        }
+    });
+
+    load_button.connect_clicked({
+        let annotations = annotations.clone();
+        let canvas = canvas.clone();
+        let window = window.clone();
+        let fps_spin = fps_spin.clone();
+        let trim_start = trim_start.clone();
+        let trim_end = trim_end.clone();
+        move |_| {
+            let dialog = gtk4::FileChooserDialog::new(
+                Some("Load Project"),
+                Some(&window),
+                gtk4::FileChooserAction::Open,
+                &[
+                    ("Cancel", gtk4::ResponseType::Cancel),
+                    ("Open", gtk4::ResponseType::Accept),
+                ],
+            );
+            dialog.connect_response({
+                let annotations = annotations.clone();
+                let canvas = canvas.clone();
+                let fps_spin = fps_spin.clone();
+                let trim_start = trim_start.clone();
+                let trim_end = trim_end.clone();
+                move |dialog, response| {
+                    if response == gtk4::ResponseType::Accept {
+                        if let Some(path) = dialog.file().and_then(|f| f.path()) {
+                            match Project::load(&path) {
+                                Ok(p) => {
+                                    *annotations.borrow_mut() = p.annotations;
+                                    fps_spin.set_value(f64::from(p.fps));
+                                    // Widen past the 100s default so a
+                                    // loaded value is never clamped.
+                                    let ts = p.trim_start_ms as f64;
+                                    trim_start.set_range(0.0, ts.max(100_000.0));
+                                    trim_start.set_value(ts);
+                                    match p.trim_end_ms {
+                                        Some(v) => {
+                                            let v = v as f64;
+                                            trim_end.set_range(0.0, v.max(100_000.0));
+                                            trim_end.set_value(v);
+                                        }
+                                        None => trim_end.set_value(0.0),
+                                    }
+                                    canvas.queue_draw();
+                                    eprintln!("loaded project from {}", path.display());
+                                }
+                                Err(e) => eprintln!("project load failed: {e}"),
                             }
                         }
                     }
