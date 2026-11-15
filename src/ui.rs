@@ -72,6 +72,10 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     let thickness_spin = gtk4::SpinButton::with_range(1.0, 10.0, 1.0);
     thickness_spin.set_value(TOOL_THICKNESS);
     tools_row.append(&thickness_spin);
+    tools_row.append(&gtk4::Label::new(Some("Font")));
+    let font_size_spin = gtk4::SpinButton::with_range(10.0, 32.0, 1.0);
+    font_size_spin.set_value(f64::from(TEXT_FONT_SIZE));
+    tools_row.append(&font_size_spin);
     let clear_button = gtk4::Button::with_label("Clear");
     tools_row.append(&clear_button);
     let save_button = gtk4::Button::with_label("Save Project");
@@ -270,6 +274,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let window = window.clone();
         let color_button = color_button.clone();
         let thickness_spin = thickness_spin.clone();
+        let font_size_spin = font_size_spin.clone();
         move |_, ox, oy| {
             if let Some((sx, sy)) = drag_start.get() {
                 let (ex, ey) = (sx + ox, sy + oy);
@@ -283,7 +288,15 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 let tool_color = picker_hex(&color_button);
                 let thickness = thickness_spin.value() as u8;
                 if tool_select.selected() == 2 {
-                    prompt_for_text(&window, x1, y1, &annotations, &canvas, &tool_color);
+                    prompt_for_text(
+                        &window,
+                        x1,
+                        y1,
+                        &annotations,
+                        &canvas,
+                        &tool_color,
+                        font_size_spin.value() as u32,
+                    );
                 } else if tool_select.selected() == 1 {
                     // Tail + tip points — any drag direction is valid.
                     if x1 != x2 || y1 != y2 {
@@ -751,6 +764,7 @@ fn prompt_for_text(
     annotations: &Rc<RefCell<Vec<Annotation>>>,
     canvas: &gtk4::DrawingArea,
     background: &str,
+    font_size: u32,
 ) {
     let dialog = gtk4::Dialog::with_buttons(
         Some("Add text"),
@@ -779,7 +793,7 @@ fn prompt_for_text(
                     text,
                     color: TEXT_COLOR.to_string(),
                     background: background.clone(),
-                    font_size: TEXT_FONT_SIZE,
+                    font_size,
                     start_ms: 0,
                     end_ms: u64::MAX,
                 }));
