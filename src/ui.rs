@@ -540,6 +540,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let canvas = canvas.clone();
         let window = window.clone();
         let fps_spin = fps_spin.clone();
+        let scale_spin = scale_spin.clone();
         let trim_start = trim_start.clone();
         let trim_end = trim_end.clone();
         move |_| {
@@ -558,6 +559,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 let frame_size = frame_size.clone();
                 let canvas = canvas.clone();
                 let fps_spin = fps_spin.clone();
+                let scale_spin = scale_spin.clone();
                 let trim_start = trim_start.clone();
                 let trim_end = trim_end.clone();
                 move |dialog, response| {
@@ -574,6 +576,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                                 width: w.max(1.0) as u32,
                                 height: h.max(1.0) as u32,
                                 fps: fps_spin.value() as u32,
+                                scale_percent: scale_spin.value() as u32,
                                 trim_start_ms: trim_start.value() as u64,
                                 // UI 0 means "to the last frame" — None.
                                 trim_end_ms: (end_raw > 0).then_some(end_raw),
@@ -597,6 +600,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let canvas = canvas.clone();
         let window = window.clone();
         let fps_spin = fps_spin.clone();
+        let scale_spin = scale_spin.clone();
         let trim_start = trim_start.clone();
         let trim_end = trim_end.clone();
         move |_| {
@@ -613,6 +617,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 let annotations = annotations.clone();
                 let canvas = canvas.clone();
                 let fps_spin = fps_spin.clone();
+                let scale_spin = scale_spin.clone();
                 let trim_start = trim_start.clone();
                 let trim_end = trim_end.clone();
                 move |dialog, response| {
@@ -622,6 +627,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                                 Ok(p) => {
                                     *annotations.borrow_mut() = p.annotations;
                                     fps_spin.set_value(f64::from(p.fps));
+                                    scale_spin.set_value(f64::from(p.scale_percent));
                                     // Widen past the 100s default so a
                                     // loaded value is never clamped.
                                     let ts = p.trim_start_ms as f64;

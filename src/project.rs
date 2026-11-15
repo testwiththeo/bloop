@@ -10,7 +10,14 @@ use serde::{Deserialize, Serialize};
 use crate::annotation::{Annotation, AnnotationError};
 
 pub const FORMAT_VERSION: &str = "1.0";
-const ALLOWED_FPS: [u32; 5] = [5, 10, 12, 15, 20];
+const MIN_FPS: u32 = 5;
+const MAX_FPS: u32 = 30;
+const MIN_SCALE_PERCENT: u32 = 25;
+const MAX_SCALE_PERCENT: u32 = 100;
+
+fn default_scale_percent() -> u32 {
+    MAX_SCALE_PERCENT
+}
 
 #[derive(Debug)]
 pub enum ProjectError {
@@ -37,6 +44,9 @@ pub struct Project {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    // Files written before this field existed load as 100.
+    #[serde(default = "default_scale_percent")]
+    pub scale_percent: u32,
     #[serde(default)]
     pub trim_start_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -57,10 +67,16 @@ impl Project {
                 "width and height must be greater than 0".to_string(),
             ));
         }
-        if !ALLOWED_FPS.contains(&self.fps) {
+        if !(MIN_FPS..=MAX_FPS).contains(&self.fps) {
             return Err(ProjectError::Validation(format!(
-                "fps {} is not one of {ALLOWED_FPS:?}",
+                "fps {} is outside {MIN_FPS}..={MAX_FPS}",
                 self.fps
+            )));
+        }
+        if !(MIN_SCALE_PERCENT..=MAX_SCALE_PERCENT).contains(&self.scale_percent) {
+            return Err(ProjectError::Validation(format!(
+                "scale_percent {} is outside {MIN_SCALE_PERCENT}..={MAX_SCALE_PERCENT}",
+                self.scale_percent
             )));
         }
         if let Some(end) = self.trim_end_ms {
@@ -139,6 +155,8 @@ mod tests {
         assert_eq!(p.trim_start_ms, 500);
         assert_eq!(p.trim_end_ms, Some(4500));
         assert_eq!(p.annotations.len(), 3);
+        // No scale_percent in the v1 fixture — migrates to 100.
+        assert_eq!(p.scale_percent, 100);
         // The fixture still uses the v1 width/height arrow form; the
         // loader migrates it to tip coordinates (120+200, 80+40).
         match &p.annotations[0] {
@@ -208,7 +226,19 @@ mod tests {
             ),
             (
                 "bad fps",
-                r##"{"version":"1.0","width":800,"height":600,"fps":7,"annotations":[]}"##,
+                r##"{"version":"1.0","width":800,"height":600,"fps":2,"annotations":[]}"##,
+            ),
+            (
+                "fps above range",
+                r##"{"version":"1.0","width":800,"height":600,"fps":31,"annotations":[]}"##,
+            ),
+            (
+                "scale too low",
+                r##"{"version":"1.0","width":800,"height":600,"fps":12,"scale_percent":10,"annotations":[]}"##,
+            ),
+            (
+                "scale too high",
+                r##"{"version":"1.0","width":800,"height":600,"fps":12,"scale_percent":150,"annotations":[]}"##,
             ),
             (
                 "bad version",

@@ -23,6 +23,7 @@ Design goals for the format:
   "width": 800,
   "height": 600,
   "fps": 12,
+  "scale_percent": 100,
   "trim_start_ms": 0,
   "trim_end_ms": 5000,
   "annotations": []
@@ -34,7 +35,8 @@ Design goals for the format:
 | `version` | string | Yes | Format version. Currently "1.0". Used for migration. |
 | `width` | integer | Yes | Recording width in pixels. Must be greater than 0. |
 | `height` | integer | Yes | Recording height in pixels. Must be greater than 0. |
-| `fps` | integer | Yes | Frames per second for export. Allowed: 5, 10, 12, 15, 20. |
+| `fps` | integer | Yes | Frames per second for export. Any value 5 to 30 inclusive. Early drafts allowed only 5, 10, 12, 15, 20; those files still load. |
+| `scale_percent` | integer | No, default 100 | Output scale for export, 25 to 100 inclusive. Files written before this field existed load as 100. |
 | `trim_start_ms` | integer | No, default 0 | Start of the kept region, in milliseconds. Must be 0 or more. |
 | `trim_end_ms` | integer | No, default equals duration | End of the kept region, in milliseconds. Must be greater than `trim_start_ms`. |
 | `annotations` | array | Yes | List of annotation objects. Can be empty. |
