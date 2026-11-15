@@ -54,7 +54,28 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     let clear_button = gtk4::Button::with_label("Clear");
     controls.append(&clear_button);
     let export_button = gtk4::Button::with_label("Export");
+    // Enabled only after Stop with a non-empty frame buffer.
+    export_button.set_sensitive(false);
     controls.append(&export_button);
+
+    // Export settings; encode_gif takes fps + scale_percent.
+    let fps_spin = gtk4::SpinButton::with_range(5.0, 30.0, 1.0);
+    fps_spin.set_value(12.0);
+    let scale_spin = gtk4::SpinButton::with_range(25.0, 100.0, 5.0);
+    scale_spin.set_value(100.0);
+    controls.append(&gtk4::Label::new(Some("FPS")));
+    controls.append(&fps_spin);
+    controls.append(&gtk4::Label::new(Some("Scale %")));
+    controls.append(&scale_spin);
+
+    // Trim in ms; 0 end means "to the last frame" — replaced with the
+    // real last timestamp on Stop.
+    let trim_start = gtk4::SpinButton::with_range(0.0, 100_000.0, 100.0);
+    let trim_end = gtk4::SpinButton::with_range(0.0, 100_000.0, 100.0);
+    controls.append(&gtk4::Label::new(Some("Start ms")));
+    controls.append(&trim_start);
+    controls.append(&gtk4::Label::new(Some("End ms")));
+    controls.append(&trim_end);
 
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     content.set_margin_top(12);
@@ -208,8 +229,10 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let preview = preview.clone();
         let record_button = record_button.clone();
         let stop_button = stop_button.clone();
+        let export_button = export_button.clone();
         move |_| {
             record_button.set_sensitive(false);
+            export_button.set_sensitive(false);
             // A new recording starts empty: previous frames and
             // annotations are dropped.
             frames.borrow_mut().clear();
@@ -272,7 +295,10 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     stop_button.connect_clicked({
         let recording = recording.clone();
         let timer_id = timer_id.clone();
+        let frames = frames.clone();
+        let trim_end = trim_end.clone();
         let record_button = record_button.clone();
+        let export_button = export_button.clone();
         move |button| {
             button.set_sensitive(false);
             if let Some(source_id) = timer_id.borrow_mut().take() {
@@ -285,6 +311,13 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                     eprintln!("stop failed: {e}");
                 }
             }
+            let last_ts = frames.borrow().last().map(|f| f.0);
+            export_button.set_sensitive(last_ts.is_some());
+            if let Some(ts) = last_ts {
+                // Default trim covers the whole recording.
+                trim_end.set_range(0.0, ts as f64);
+                trim_end.set_value(ts as f64);
+            }
             record_button.set_sensitive(true);
         }
     });
@@ -293,6 +326,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let frames = frames.clone();
         let annotations = annotations.clone();
         let window = window.clone();
+        let export_button = export_button.clone();
         move |_| {
             // FileChooserDialog (FileChooserExt::file/set_action/
             // set_current_name, docs.rs gtk4). Deprecated markers on
@@ -308,29 +342,51 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 ],
             );
             dialog.set_current_name("bloop.gif");
+            // GIF-only filter — FileFilter::add_mime_type,
+            // FileChooserExt::add_filter (docs.rs gtk4).
+            let filter = gtk4::FileFilter::new();
+            filter.set_name(Some("GIF images"));
+            filter.add_mime_type("image/gif");
+            dialog.add_filter(&filter);
             dialog.connect_response({
                 let frames = frames.clone();
                 let annotations = annotations.clone();
+                let export_button = export_button.clone();
+                let fps_spin = fps_spin.clone();
+                let scale_spin = scale_spin.clone();
+                let trim_start = trim_start.clone();
+                let trim_end = trim_end.clone();
                 move |dialog, response| {
                     if response == gtk4::ResponseType::Accept {
-                        if let Some(path) = dialog.file().and_then(|f| f.path()) {
-                            // 12fps is the SPEC default; encode uses
-                            // frame timestamps, so fps only feeds the
-                            // size estimate. Full range, full scale.
+                        let start_ms = trim_start.value() as u64;
+                        let end_raw = trim_end.value() as u64;
+                        let end_ms = if end_raw == 0 { u64::MAX } else { end_raw };
+                        if end_raw != 0 && start_ms > end_raw {
+                            eprintln!(
+                                "trim start {start_ms} is after trim end {end_raw}; export aborted"
+                            );
+                        } else if let Some(path) = dialog.file().and_then(|f| f.path()) {
+                            // fps feeds the size estimate (timing comes
+                            // from frame PTS), scale_percent resizes
+                            // output.
                             match export::encode_gif(
                                 frames.borrow().as_slice(),
                                 annotations.borrow().as_slice(),
-                                12,
-                                100,
-                                0,
-                                u64::MAX,
+                                fps_spin.value() as u32,
+                                scale_spin.value() as u32,
+                                start_ms,
+                                end_ms,
                             ) {
                                 Ok(gif) => match std::fs::write(&path, &gif.bytes) {
-                                    Ok(()) => eprintln!(
-                                        "exported {} bytes to {}",
-                                        gif.bytes.len(),
-                                        path.display()
-                                    ),
+                                    Ok(()) => {
+                                        eprintln!(
+                                            "exported {} bytes to {}",
+                                            gif.bytes.len(),
+                                            path.display()
+                                        );
+                                        frames.borrow_mut().clear();
+                                        export_button.set_sensitive(false);
+                                    }
                                     Err(e) => eprintln!("write failed: {e}"),
                                 },
                                 Err(e) => eprintln!("encode failed: {e}"),
