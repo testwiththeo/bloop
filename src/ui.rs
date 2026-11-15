@@ -52,40 +52,49 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     preview_frame.set_child(Some(&preview_stack));
     preview_frame.set_vexpand(true);
 
-    let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
-    controls.set_halign(gtk4::Align::Center);
+    // Row 1: annotation tools. Row 2: transport + export settings.
+    let controls = gtk4::Box::new(gtk4::Orientation::Vertical, 6);
+    let tools_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    tools_row.set_halign(gtk4::Align::Center);
     // Tool selector: 0 = Rectangle, 1 = Arrow, 2 = Text, 3 = Blur,
     // 4 = Highlight.
     let tool_select =
         gtk4::DropDown::from_strings(&["Rectangle", "Arrow", "Text", "Blur", "Highlight"]);
-    controls.append(&tool_select);
-    controls.append(&record_button);
-    controls.append(&stop_button);
+    tools_row.append(&tool_select);
     let clear_button = gtk4::Button::with_label("Clear");
-    controls.append(&clear_button);
+    tools_row.append(&clear_button);
+
+    let transport_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    transport_row.set_halign(gtk4::Align::Center);
+    transport_row.append(&record_button);
+    transport_row.append(&stop_button);
     let export_button = gtk4::Button::with_label("Export");
     // Enabled only after Stop with a non-empty frame buffer.
     export_button.set_sensitive(false);
-    controls.append(&export_button);
+    transport_row.append(&export_button);
 
     // Export settings; encode_gif takes fps + scale_percent.
     let fps_spin = gtk4::SpinButton::with_range(5.0, 30.0, 1.0);
     fps_spin.set_value(12.0);
     let scale_spin = gtk4::SpinButton::with_range(25.0, 100.0, 5.0);
     scale_spin.set_value(100.0);
-    controls.append(&gtk4::Label::new(Some("FPS")));
-    controls.append(&fps_spin);
-    controls.append(&gtk4::Label::new(Some("Scale %")));
-    controls.append(&scale_spin);
+    transport_row.append(&gtk4::Label::new(Some("FPS")));
+    transport_row.append(&fps_spin);
+    transport_row.append(&gtk4::Label::new(Some("Scale %")));
+    transport_row.append(&scale_spin);
 
     // Trim in ms; 0 end means "to the last frame" — replaced with the
     // real last timestamp on Stop.
     let trim_start = gtk4::SpinButton::with_range(0.0, 100_000.0, 100.0);
     let trim_end = gtk4::SpinButton::with_range(0.0, 100_000.0, 100.0);
-    controls.append(&gtk4::Label::new(Some("Start ms")));
-    controls.append(&trim_start);
-    controls.append(&gtk4::Label::new(Some("End ms")));
-    controls.append(&trim_end);
+    transport_row.append(&gtk4::Label::new(Some("Start ms")));
+    transport_row.append(&trim_start);
+    transport_row.append(&gtk4::Label::new(Some("End ms")));
+    transport_row.append(&trim_end);
+
+    controls.append(&tools_row);
+    controls.append(&transport_row);
+    controls.set_halign(gtk4::Align::Center);
 
     let content = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     content.set_margin_top(12);
