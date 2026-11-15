@@ -55,21 +55,25 @@ Every annotation, regardless of type, has these fields:
 
 ### Arrow
 
-An arrow points from its origin to its tip. The `width` and `height` define the bounding box of the arrow. The arrow is drawn from the top left of the box to the bottom right, with an arrowhead at the tip. The user can flip the direction by dragging.
+An arrow points from its tail at `(x, y)` to its tip at `(tip_x, tip_y)`. The arrowhead sits at the tip. The tip can be in any direction from the tail, including up and left.
 
 ```json
 {
   "type": "arrow",
   "x": 120,
   "y": 80,
-  "width": 200,
-  "height": 40,
+  "tip_x": 320,
+  "tip_y": 120,
   "color": "#FF0000",
   "thickness": 3,
   "start_ms": 1000,
   "end_ms": 3000
 }
 ```
+
+- `x`, `y`: tail point in pixels.
+- `tip_x`, `tip_y`: tip point in pixels, where the arrowhead is drawn.
+- Compatibility: files written before this change stored `width` and `height` instead of `tip_x` and `tip_y`, with the tip always at the bottom-right of the bounding box. The loader converts them: `tip_x = x + width`, `tip_y = y + height`.
 
 - `color`: HEX string, for example "#FF0000". Must match `^#[0-9A-Fa-f]{6}$`.
 - `thickness`: integer, 1 to 10, default 3. Line thickness in pixels.
@@ -188,8 +192,8 @@ If a file fails validation, show a clear error: "This project file is invalid: a
       "type": "arrow",
       "x": 120,
       "y": 80,
-      "width": 200,
-      "height": 40,
+      "tip_x": 320,
+      "tip_y": 120,
       "color": "#FF0000",
       "thickness": 3,
       "start_ms": 1000,

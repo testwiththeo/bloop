@@ -139,6 +139,25 @@ mod tests {
         assert_eq!(p.trim_start_ms, 500);
         assert_eq!(p.trim_end_ms, Some(4500));
         assert_eq!(p.annotations.len(), 3);
+        // The fixture still uses the v1 width/height arrow form; the
+        // loader migrates it to tip coordinates (120+200, 80+40).
+        match &p.annotations[0] {
+            Annotation::Arrow(a) => assert_eq!((a.tip_x, a.tip_y), (320, 120)),
+            other => panic!("expected arrow, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arrow_tip_pair_format_loads() {
+        let json = r##"{"version":"1.0","width":800,"height":600,"fps":12,
+            "annotations":[{"type":"arrow","x":60,"y":50,"tip_x":10,"tip_y":20,
+            "color":"#FF0000","thickness":3,"start_ms":0,"end_ms":1000}]}"##;
+        let p = Project::from_json(json).expect("tip_x/tip_y form loads");
+        match &p.annotations[0] {
+            // Tip can sit up-left of the tail — any direction now.
+            Annotation::Arrow(a) => assert_eq!((a.x, a.y, a.tip_x, a.tip_y), (60, 50, 10, 20)),
+            other => panic!("expected arrow, got {other:?}"),
+        }
     }
 
     #[test]

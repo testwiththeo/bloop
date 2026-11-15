@@ -9,14 +9,19 @@ use adw::prelude::*;
 use cairo::ImageSurface;
 use gtk4::gio::prelude::FileExt;
 
-use crate::annotation::{Annotation, BoxAnnotation};
+use crate::annotation::{Annotation, Arrow, Blur, BoxAnnotation, Highlight, Text};
 use crate::capture::{self, AshpdPortal, Recording};
 use crate::export;
 use crate::pipeline::Pipeline;
 
 const WINDOW_TITLE: &str = "Bloop";
-const BOX_COLOR: &str = "#FF0000";
-const BOX_THICKNESS: f64 = 3.0;
+const TOOL_COLOR: &str = "#FF0000";
+const TOOL_THICKNESS: f64 = 3.0;
+const TEXT_COLOR: &str = "#FFFFFF";
+const TEXT_FONT_SIZE: u32 = 14;
+const BLUR_RADIUS: u32 = 12;
+const HIGHLIGHT_COLOR: &str = "#FFFF00";
+const HIGHLIGHT_OPACITY: f64 = 0.4;
 const MAX_FRAMES: usize = 600;
 
 type ActiveRecording = Recording<AshpdPortal, Pipeline>;
@@ -49,6 +54,11 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
 
     let controls = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     controls.set_halign(gtk4::Align::Center);
+    // Tool selector: 0 = Rectangle, 1 = Arrow, 2 = Text, 3 = Blur,
+    // 4 = Highlight.
+    let tool_select =
+        gtk4::DropDown::from_strings(&["Rectangle", "Arrow", "Text", "Blur", "Highlight"]);
+    controls.append(&tool_select);
     controls.append(&record_button);
     controls.append(&stop_button);
     let clear_button = gtk4::Button::with_label("Clear");
@@ -110,38 +120,91 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let frame_size = frame_size.clone();
         let drag_start = drag_start.clone();
         let drag_now = drag_now.clone();
+        let tool_select = tool_select.clone();
         move |_, cr, w, h| {
             let widget = (f64::from(w), f64::from(h));
             let frame = effective_frame_size(frame_size.get(), widget);
             let content = picture_content_rect(widget, frame);
             for ann in annotations.borrow().iter() {
-                // Only the rectangle tool exists; other variants cannot
-                // appear in the vec yet.
-                if let Annotation::Box(b) = ann {
-                    let (x1, y1) = frame_to_widget(f64::from(b.x), f64::from(b.y), content, frame);
-                    let (x2, y2) = frame_to_widget(
-                        f64::from(b.x + b.width),
-                        f64::from(b.y + b.height),
-                        content,
-                        frame,
-                    );
-                    stroke_box(
-                        cr,
-                        &b.color,
-                        f64::from(b.thickness),
-                        1.0,
-                        (x1, y1, x2 - x1, y2 - y1),
-                    );
+                match ann {
+                    Annotation::Box(b) => {
+                        let (x1, y1) =
+                            frame_to_widget(f64::from(b.x), f64::from(b.y), content, frame);
+                        let (x2, y2) = frame_to_widget(
+                            f64::from(b.x + b.width),
+                            f64::from(b.y + b.height),
+                            content,
+                            frame,
+                        );
+                        stroke_box(
+                            cr,
+                            &b.color,
+                            f64::from(b.thickness),
+                            1.0,
+                            (x1, y1, x2 - x1, y2 - y1),
+                        );
+                    }
+                    Annotation::Arrow(a) => {
+                        let tail = frame_to_widget(f64::from(a.x), f64::from(a.y), content, frame);
+                        let tip =
+                            frame_to_widget(f64::from(a.tip_x), f64::from(a.tip_y), content, frame);
+                        stroke_arrow(cr, &a.color, f64::from(a.thickness), 1.0, tail, tip);
+                    }
+                    Annotation::Text(t) => {
+                        let at = frame_to_widget(f64::from(t.x), f64::from(t.y), content, frame);
+                        draw_text_overlay(cr, t, at);
+                    }
+                    Annotation::Blur(b) => {
+                        // Preview shows a translucent veil + dashed edge;
+                        // the real blur only happens in export.
+                        let (x1, y1) =
+                            frame_to_widget(f64::from(b.x), f64::from(b.y), content, frame);
+                        let (x2, y2) = frame_to_widget(
+                            f64::from(b.x + b.width),
+                            f64::from(b.y + b.height),
+                            content,
+                            frame,
+                        );
+                        fill_blur_rect(cr, (x1, y1, x2 - x1, y2 - y1), 0.4);
+                        dash_stroke(cr, (x1, y1, x2 - x1, y2 - y1));
+                    }
+                    Annotation::Highlight(h) => {
+                        let (x1, y1) =
+                            frame_to_widget(f64::from(h.x), f64::from(h.y), content, frame);
+                        let (x2, y2) = frame_to_widget(
+                            f64::from(h.x + h.width),
+                            f64::from(h.y + h.height),
+                            content,
+                            frame,
+                        );
+                        fill_tinted_rect(cr, &h.color, h.opacity, (x1, y1, x2 - x1, y2 - y1));
+                    }
                 }
             }
             if let (Some((sx, sy)), Some((ex, ey))) = (drag_start.get(), drag_now.get()) {
-                stroke_box(
-                    cr,
-                    BOX_COLOR,
-                    BOX_THICKNESS,
-                    0.7,
-                    (sx.min(ex), sy.min(ey), (ex - sx).abs(), (ey - sy).abs()),
-                );
+                match tool_select.selected() {
+                    1 => stroke_arrow(cr, TOOL_COLOR, TOOL_THICKNESS, 0.7, (sx, sy), (ex, ey)),
+                    // Text has no live shape; the dialog appears on click.
+                    0 => stroke_box(
+                        cr,
+                        TOOL_COLOR,
+                        TOOL_THICKNESS,
+                        0.7,
+                        (sx.min(ex), sy.min(ey), (ex - sx).abs(), (ey - sy).abs()),
+                    ),
+                    3 => fill_blur_rect(
+                        cr,
+                        (sx.min(ex), sy.min(ey), (ex - sx).abs(), (ey - sy).abs()),
+                        0.7,
+                    ),
+                    4 => fill_tinted_rect(
+                        cr,
+                        HIGHLIGHT_COLOR,
+                        0.7,
+                        (sx.min(ex), sy.min(ey), (ex - sx).abs(), (ey - sy).abs()),
+                    ),
+                    _ => {}
+                }
             }
         }
     });
@@ -173,7 +236,9 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let frame_size = frame_size.clone();
         let drag_start = drag_start.clone();
         let drag_now = drag_now.clone();
+        let tool_select = tool_select.clone();
         let canvas = canvas.clone();
+        let window = window.clone();
         move |_, ox, oy| {
             if let Some((sx, sy)) = drag_start.get() {
                 let (ex, ey) = (sx + ox, sy + oy);
@@ -184,23 +249,72 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 // land on the frame edge, not a saturated u32.
                 let (x1, y1) = widget_to_frame(sx, sy, content, frame);
                 let (x2, y2) = widget_to_frame(ex, ey, content, frame);
-                let (x, y) = (x1.min(x2), y1.min(y2));
-                let (w, h) = (x1.abs_diff(x2), y1.abs_diff(y2));
-                if w >= 1 && h >= 1 {
-                    // start_ms..end_ms spans everything so the box is
-                    // visible for the whole recording.
-                    annotations
-                        .borrow_mut()
-                        .push(Annotation::Box(BoxAnnotation {
+                if tool_select.selected() == 2 {
+                    prompt_for_text(&window, x1, y1, &annotations, &canvas);
+                } else if tool_select.selected() == 1 {
+                    // Tail + tip points — any drag direction is valid.
+                    if x1 != x2 || y1 != y2 {
+                        annotations.borrow_mut().push(Annotation::Arrow(Arrow {
+                            x: x1,
+                            y: y1,
+                            tip_x: x2,
+                            tip_y: y2,
+                            color: TOOL_COLOR.to_string(),
+                            thickness: TOOL_THICKNESS as u8,
+                            start_ms: 0,
+                            end_ms: u64::MAX,
+                        }));
+                    }
+                } else if tool_select.selected() == 3 {
+                    let (x, y) = (x1.min(x2), y1.min(y2));
+                    let (w, h) = (x1.abs_diff(x2), y1.abs_diff(y2));
+                    if w >= 1 && h >= 1 {
+                        annotations.borrow_mut().push(Annotation::Blur(Blur {
                             x,
                             y,
                             width: w,
                             height: h,
-                            color: BOX_COLOR.to_string(),
-                            thickness: BOX_THICKNESS as u8,
+                            radius: BLUR_RADIUS,
                             start_ms: 0,
                             end_ms: u64::MAX,
                         }));
+                    }
+                } else if tool_select.selected() == 4 {
+                    let (x, y) = (x1.min(x2), y1.min(y2));
+                    let (w, h) = (x1.abs_diff(x2), y1.abs_diff(y2));
+                    if w >= 1 && h >= 1 {
+                        annotations
+                            .borrow_mut()
+                            .push(Annotation::Highlight(Highlight {
+                                x,
+                                y,
+                                width: w,
+                                height: h,
+                                color: HIGHLIGHT_COLOR.to_string(),
+                                opacity: HIGHLIGHT_OPACITY,
+                                start_ms: 0,
+                                end_ms: u64::MAX,
+                            }));
+                    }
+                } else {
+                    let (x, y) = (x1.min(x2), y1.min(y2));
+                    let (w, h) = (x1.abs_diff(x2), y1.abs_diff(y2));
+                    if w >= 1 && h >= 1 {
+                        // start_ms..end_ms spans everything so the box
+                        // is visible for the whole recording.
+                        annotations
+                            .borrow_mut()
+                            .push(Annotation::Box(BoxAnnotation {
+                                x,
+                                y,
+                                width: w,
+                                height: h,
+                                color: TOOL_COLOR.to_string(),
+                                thickness: TOOL_THICKNESS as u8,
+                                start_ms: 0,
+                                end_ms: u64::MAX,
+                            }));
+                    }
                 }
             }
             drag_start.set(None);
@@ -451,6 +565,181 @@ fn effective_frame_size(frame: (f64, f64), widget: (f64, f64)) -> (f64, f64) {
     } else {
         widget
     }
+}
+
+/// Opens the small text dialog: an Entry with OK and Cancel. On OK with
+/// non-empty text, a Text annotation is pushed at the clicked frame
+/// coordinates. gtk4::Dialog is deprecated in GTK 4.10+ but its
+/// #[deprecated] attrs are feature-gated like FileChooserDialog, and
+/// adw::AlertDialog cannot hold an Entry.
+fn prompt_for_text(
+    window: &adw::ApplicationWindow,
+    x: u32,
+    y: u32,
+    annotations: &Rc<RefCell<Vec<Annotation>>>,
+    canvas: &gtk4::DrawingArea,
+) {
+    let dialog = gtk4::Dialog::with_buttons(
+        Some("Add text"),
+        Some(window),
+        gtk4::DialogFlags::MODAL,
+        &[
+            ("Cancel", gtk4::ResponseType::Cancel),
+            ("OK", gtk4::ResponseType::Accept),
+        ],
+    );
+    let entry = gtk4::Entry::new();
+    entry.set_max_length(140); // MAX_TEXT_CHARS in annotation.rs
+    entry.set_placeholder_text(Some("Annotation text"));
+    entry.set_width_chars(24);
+    dialog.content_area().append(&entry);
+    dialog.connect_response({
+        let annotations = annotations.clone();
+        let canvas = canvas.clone();
+        move |d, response| {
+            let text = entry.text().to_string();
+            if response == gtk4::ResponseType::Accept && !text.is_empty() {
+                annotations.borrow_mut().push(Annotation::Text(Text {
+                    x,
+                    y,
+                    text,
+                    color: TEXT_COLOR.to_string(),
+                    background: TOOL_COLOR.to_string(),
+                    font_size: TEXT_FONT_SIZE,
+                    start_ms: 0,
+                    end_ms: u64::MAX,
+                }));
+                canvas.queue_draw();
+            }
+            d.close();
+        }
+    });
+    dialog.present();
+}
+
+/// Draws a stored text annotation on the canvas the same way
+/// draw_text_on_frame renders it at export: Sans at font_size px, a
+/// pill background padded by half the font size, text at the same
+/// bearing-corrected origin.
+fn draw_text_overlay(cr: &cairo::Context, text: &Text, at: (f64, f64)) {
+    cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Normal);
+    cr.set_font_size(f64::from(text.font_size));
+    let Ok(ext) = cr.text_extents(&text.text) else {
+        return;
+    };
+    let pad = f64::from(text.font_size) * 0.5;
+    if let Ok(bg) = gtk4::gdk::RGBA::parse(&text.background) {
+        rounded_rect(
+            cr,
+            at.0,
+            at.1,
+            ext.width() + 2.0 * pad,
+            ext.height() + 2.0 * pad,
+        );
+        cr.set_source_rgb(
+            f64::from(bg.red()),
+            f64::from(bg.green()),
+            f64::from(bg.blue()),
+        );
+        let _ = cr.fill();
+    }
+    if let Ok(fg) = gtk4::gdk::RGBA::parse(&text.color) {
+        cr.set_source_rgb(
+            f64::from(fg.red()),
+            f64::from(fg.green()),
+            f64::from(fg.blue()),
+        );
+        cr.move_to(at.0 + pad - ext.x_bearing(), at.1 + pad - ext.y_bearing());
+        let _ = cr.show_text(&text.text);
+    }
+}
+
+/// Pill path used by draw_text_overlay; mirrors rounded_rectangle in
+/// annotation.rs with r = min(w/2, h/2).
+fn rounded_rect(cr: &cairo::Context, x: f64, y: f64, w: f64, h: f64) {
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let r = (w / 2.0).min(h / 2.0);
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -FRAC_PI_2, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, FRAC_PI_2);
+    cr.arc(x + r, y + h - r, r, FRAC_PI_2, PI);
+    cr.arc(x + r, y + r, r, PI, 3.0 * FRAC_PI_2);
+    cr.close_path();
+}
+
+/// Strokes one arrow (shaft + two wings) on the overlay canvas. The
+/// wing geometry mirrors arrow_segments in annotation.rs — head length
+/// min(10 + 2*thickness, len/2), wings at 0.6*head perpendicular —
+/// so what the user draws matches what draw_arrow_on_frame renders.
+fn stroke_arrow(
+    cr: &cairo::Context,
+    color: &str,
+    thickness: f64,
+    alpha: f64,
+    tail: (f64, f64),
+    tip: (f64, f64),
+) {
+    if let Ok(rgba) = gtk4::gdk::RGBA::parse(color) {
+        cr.set_source_rgba(
+            f64::from(rgba.red()),
+            f64::from(rgba.green()),
+            f64::from(rgba.blue()),
+            alpha,
+        );
+        cr.set_line_width(thickness);
+        cr.set_line_cap(cairo::LineCap::Round);
+        let (dx, dy) = (tip.0 - tail.0, tip.1 - tail.1);
+        let len = dx.hypot(dy);
+        cr.move_to(tail.0, tail.1);
+        cr.line_to(tip.0, tip.1);
+        if len > 0.0 {
+            let head = (10.0 + 2.0 * thickness).min(len / 2.0);
+            let (ux, uy) = (dx / len, dy / len);
+            let wing = head * 0.6;
+            let (bx, by) = (tip.0 - ux * head, tip.1 - uy * head);
+            cr.move_to(bx - uy * wing, by + ux * wing);
+            cr.line_to(tip.0, tip.1);
+            cr.move_to(bx + ux * wing, by - ux * wing);
+            cr.line_to(tip.0, tip.1);
+        }
+        let _ = cr.stroke();
+    }
+}
+
+/// Fills a blur region veil on the canvas — gray at the given alpha.
+fn fill_blur_rect(cr: &cairo::Context, rect: (f64, f64, f64, f64), alpha: f64) {
+    let (x, y, w, h) = rect;
+    cr.rectangle(x, y, w, h);
+    cr.set_source_rgba(0.5, 0.5, 0.5, alpha);
+    let _ = cr.fill();
+}
+
+/// Fills a rect with a parsed hex color at the given alpha — the
+/// highlight overlay, live and stored, same as export's fill.
+fn fill_tinted_rect(cr: &cairo::Context, color: &str, alpha: f64, rect: (f64, f64, f64, f64)) {
+    if let Ok(rgba) = gtk4::gdk::RGBA::parse(color) {
+        let (x, y, w, h) = rect;
+        cr.rectangle(x, y, w, h);
+        cr.set_source_rgba(
+            f64::from(rgba.red()),
+            f64::from(rgba.green()),
+            f64::from(rgba.blue()),
+            alpha,
+        );
+        let _ = cr.fill();
+    }
+}
+
+/// Dashed border around a stored blur region so it stays visible
+/// against any content. Dash is reset after the stroke.
+fn dash_stroke(cr: &cairo::Context, rect: (f64, f64, f64, f64)) {
+    let (x, y, w, h) = rect;
+    cr.rectangle(x, y, w, h);
+    cr.set_dash(&[4.0, 4.0], 0.0);
+    cr.set_source_rgba(0.4, 0.4, 0.4, 0.9);
+    cr.set_line_width(1.5);
+    let _ = cr.stroke();
+    cr.set_dash(&[], 0.0);
 }
 
 /// Strokes one rectangle on the overlay canvas. Color parses through

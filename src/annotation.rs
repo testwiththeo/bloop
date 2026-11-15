@@ -144,8 +144,8 @@ pub fn draw_arrow_on_frame(frame: &ImageSurface, arrow: &Arrow) -> Result<(), Dr
 fn arrow_segments(arrow: &Arrow) -> [(f64, f64, f64, f64); 3] {
     let x0 = f64::from(arrow.x);
     let y0 = f64::from(arrow.y);
-    let tip_x = x0 + f64::from(arrow.width);
-    let tip_y = y0 + f64::from(arrow.height);
+    let tip_x = f64::from(arrow.tip_x);
+    let tip_y = f64::from(arrow.tip_y);
     let dx = tip_x - x0;
     let dy = tip_y - y0;
     let len = dx.hypot(dy);
@@ -341,16 +341,55 @@ fn box_blur_region(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Arrow {
+    // Tail point, in frame pixels.
     pub x: u32,
     pub y: u32,
-    pub width: u32,
-    pub height: u32,
+    // Tip point where the arrowhead sits, in frame pixels. Any direction.
+    pub tip_x: u32,
+    pub tip_y: u32,
     pub color: String,
     pub thickness: u8,
     pub start_ms: u64,
     pub end_ms: u64,
+}
+
+// v1 files wrote arrows as an x/y/width/height bounding box whose tip was
+// always the bottom-right corner. Accept that form on load and convert it
+// to tip coordinates; new files always write tip_x/tip_y.
+impl<'de> Deserialize<'de> for Arrow {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Repr {
+            x: u32,
+            y: u32,
+            tip_x: Option<u32>,
+            tip_y: Option<u32>,
+            width: Option<u32>,
+            height: Option<u32>,
+            color: String,
+            thickness: u8,
+            start_ms: u64,
+            end_ms: u64,
+        }
+        let r = Repr::deserialize(d)?;
+        let (tip_x, tip_y) = match (r.tip_x, r.tip_y, r.width, r.height) {
+            (Some(tx), Some(ty), _, _) => (tx, ty),
+            (None, None, Some(w), Some(h)) => (r.x.saturating_add(w), r.y.saturating_add(h)),
+            _ => return Err(serde::de::Error::missing_field("tip_x")),
+        };
+        Ok(Arrow {
+            x: r.x,
+            y: r.y,
+            tip_x,
+            tip_y,
+            color: r.color,
+            thickness: r.thickness,
+            start_ms: r.start_ms,
+            end_ms: r.end_ms,
+        })
+    }
 }
 
 impl Arrow {
@@ -585,8 +624,8 @@ mod tests {
         Arrow {
             x: 120,
             y: 80,
-            width: 200,
-            height: 40,
+            tip_x: 320,
+            tip_y: 120,
             color: "#FF0000".to_string(),
             thickness: 3,
             start_ms: 1000,
@@ -791,6 +830,40 @@ mod tests {
             0,
             "shaft midpoint is empty"
         );
+    }
+
+    #[test]
+    fn arrow_draws_in_all_directions() {
+        // Tail fixed at (200,100); tip in each quadrant. The midpoint
+        // values sit on each shaft line.
+        for (tip_x, tip_y, mid_x, mid_y) in [
+            (300, 150, 250, 125), // down-right
+            (100, 150, 150, 125), // down-left
+            (300, 50, 250, 75),   // up-right
+            (100, 50, 150, 75),   // up-left
+        ] {
+            let mut surface = blank_surface();
+            let mut a = arrow();
+            a.x = 200;
+            a.y = 100;
+            a.tip_x = tip_x;
+            a.tip_y = tip_y;
+            draw_arrow_on_frame(&surface, &a).expect("arrow draws");
+            assert_ne!(
+                alpha_at(&mut surface, mid_x, mid_y),
+                0,
+                "shaft midpoint empty for tip ({tip_x}, {tip_y})"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_length_arrow_does_not_panic() {
+        let surface = blank_surface();
+        let mut a = arrow();
+        a.tip_x = a.x;
+        a.tip_y = a.y;
+        draw_arrow_on_frame(&surface, &a).expect("zero-length arrow draws");
     }
 
     #[test]
