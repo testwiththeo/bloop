@@ -82,6 +82,10 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     tools_row.append(&save_button);
     let load_button = gtk4::Button::with_label("Load Project");
     tools_row.append(&load_button);
+    let delete_button = gtk4::Button::with_label("Delete Selected");
+    // Enabled only while an annotation is selected.
+    delete_button.set_sensitive(false);
+    tools_row.append(&delete_button);
 
     let transport_row = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
     transport_row.set_halign(gtk4::Align::Center);
@@ -142,6 +146,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     let frame_size: Rc<Cell<(f64, f64)>> = Rc::new(Cell::new((0.0, 0.0)));
     let drag_start: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
     let drag_now: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+    // Index of the selected annotation in the vec, if any.
+    let selected: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
 
     canvas.set_draw_func({
         let annotations = annotations.clone();
@@ -151,11 +157,12 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let tool_select = tool_select.clone();
         let color_button = color_button.clone();
         let thickness_spin = thickness_spin.clone();
+        let selected = selected.clone();
         move |_, cr, w, h| {
             let widget = (f64::from(w), f64::from(h));
             let frame = effective_frame_size(frame_size.get(), widget);
             let content = picture_content_rect(widget, frame);
-            for ann in annotations.borrow().iter() {
+            for (i, ann) in annotations.borrow().iter().enumerate() {
                 match ann {
                     Annotation::Box(b) => {
                         let (x1, y1) =
@@ -209,6 +216,19 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                         );
                         fill_tinted_rect(cr, &h.color, h.opacity, (x1, y1, x2 - x1, y2 - y1));
                     }
+                }
+                if Some(i) == selected.get() {
+                    // Selected annotation gets a dashed white border
+                    // over its normal draw.
+                    let (bx, by, bw, bh) = annotation_bbox(ann);
+                    let (dx1, dy1) = frame_to_widget(bx, by, content, frame);
+                    let (dx2, dy2) = frame_to_widget(bx + bw, by + bh, content, frame);
+                    cr.rectangle(dx1, dy1, dx2 - dx1, dy2 - dy1);
+                    cr.set_dash(&[4.0, 4.0], 0.0);
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+                    cr.set_line_width(1.5);
+                    let _ = cr.stroke();
+                    cr.set_dash(&[], 0.0);
                 }
             }
             if let (Some((sx, sy)), Some((ex, ey))) = (drag_start.get(), drag_now.get()) {
@@ -275,6 +295,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let color_button = color_button.clone();
         let thickness_spin = thickness_spin.clone();
         let font_size_spin = font_size_spin.clone();
+        let selected = selected.clone();
+        let delete_button = delete_button.clone();
         move |_, ox, oy| {
             if let Some((sx, sy)) = drag_start.get() {
                 let (ex, ey) = (sx + ox, sy + oy);
@@ -287,7 +309,16 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 let (x2, y2) = widget_to_frame(ex, ey, content, frame);
                 let tool_color = picker_hex(&color_button);
                 let thickness = thickness_spin.value() as u8;
-                if tool_select.selected() == 2 {
+                let is_click = ox.abs() < 3.0 && oy.abs() < 3.0;
+                let hit = is_click
+                    .then(|| hit_index(&annotations.borrow(), f64::from(x1), f64::from(y1)))
+                    .flatten();
+                if is_click && (hit.is_some() || tool_select.selected() != 2) {
+                    // A click selects the topmost annotation under the
+                    // point; empty space clears the selection.
+                    selected.set(hit);
+                    delete_button.set_sensitive(hit.is_some());
+                } else if tool_select.selected() == 2 {
                     prompt_for_text(
                         &window,
                         x1,
@@ -372,9 +403,30 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
 
     clear_button.connect_clicked({
         let annotations = annotations.clone();
+        let selected = selected.clone();
+        let delete_button = delete_button.clone();
         let canvas = canvas.clone();
         move |_| {
             annotations.borrow_mut().clear();
+            selected.set(None);
+            delete_button.set_sensitive(false);
+            canvas.queue_draw();
+        }
+    });
+
+    delete_button.connect_clicked({
+        let annotations = annotations.clone();
+        let selected = selected.clone();
+        let delete_button = delete_button.clone();
+        let canvas = canvas.clone();
+        move |_| {
+            if let Some(i) = selected.take() {
+                let mut anns = annotations.borrow_mut();
+                if i < anns.len() {
+                    anns.remove(i);
+                }
+            }
+            delete_button.set_sensitive(false);
             canvas.queue_draw();
         }
     });
@@ -390,6 +442,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let record_button = record_button.clone();
         let stop_button = stop_button.clone();
         let export_button = export_button.clone();
+        let selected = selected.clone();
+        let delete_button = delete_button.clone();
         move |_| {
             record_button.set_sensitive(false);
             export_button.set_sensitive(false);
@@ -397,6 +451,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
             // annotations are dropped.
             frames.borrow_mut().clear();
             annotations.borrow_mut().clear();
+            selected.set(None);
+            delete_button.set_sensitive(false);
             canvas.queue_draw();
             let recording = recording.clone();
             let timer_id = timer_id.clone();
@@ -652,12 +708,16 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 let scale_spin = scale_spin.clone();
                 let trim_start = trim_start.clone();
                 let trim_end = trim_end.clone();
+                let selected = selected.clone();
+                let delete_button = delete_button.clone();
                 move |dialog, response| {
                     if response == gtk4::ResponseType::Accept {
                         if let Some(path) = dialog.file().and_then(|f| f.path()) {
                             match Project::load(&path) {
                                 Ok(p) => {
                                     *annotations.borrow_mut() = p.annotations;
+                                    selected.set(None);
+                                    delete_button.set_sensitive(false);
                                     fps_spin.set_value(f64::from(p.fps));
                                     scale_spin.set_value(f64::from(p.scale_percent));
                                     // Widen past the 100s default so a
@@ -738,6 +798,82 @@ fn effective_frame_size(frame: (f64, f64), widget: (f64, f64)) -> (f64, f64) {
     } else {
         widget
     }
+}
+
+/// Estimated bounding box of a Text annotation in frame pixels — the
+/// overlay's pill is roughly len*0.6*fs + fs wide and 2*fs tall.
+fn text_estimate_bbox(t: &Text) -> (f64, f64, f64, f64) {
+    let fs = f64::from(t.font_size);
+    (
+        f64::from(t.x),
+        f64::from(t.y),
+        fs * (0.6 * t.text.chars().count() as f64 + 1.0),
+        fs * 2.0,
+    )
+}
+
+/// Bounding box of any annotation in frame pixels: (x, y, w, h).
+fn annotation_bbox(a: &Annotation) -> (f64, f64, f64, f64) {
+    match a {
+        Annotation::Box(b) => (
+            f64::from(b.x),
+            f64::from(b.y),
+            f64::from(b.width),
+            f64::from(b.height),
+        ),
+        Annotation::Blur(b) => (
+            f64::from(b.x),
+            f64::from(b.y),
+            f64::from(b.width),
+            f64::from(b.height),
+        ),
+        Annotation::Highlight(h) => (
+            f64::from(h.x),
+            f64::from(h.y),
+            f64::from(h.width),
+            f64::from(h.height),
+        ),
+        Annotation::Arrow(a) => (
+            f64::from(a.x.min(a.tip_x)),
+            f64::from(a.y.min(a.tip_y)),
+            f64::from(a.x.abs_diff(a.tip_x)),
+            f64::from(a.y.abs_diff(a.tip_y)),
+        ),
+        Annotation::Text(t) => text_estimate_bbox(t),
+    }
+}
+
+/// Distance from point p to segment a..b.
+fn distance_to_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 == 0.0 {
+        0.0
+    } else {
+        (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
+    (p.0 - cx).hypot(p.1 - cy)
+}
+
+/// Index of the topmost (last drawn) annotation under the frame-space
+/// point. Boxes, blurs, and highlights test inside their rect; arrows
+/// test distance to the shaft segment within 10px; text tests its
+/// estimated bounding box.
+fn hit_index(annotations: &[Annotation], fx: f64, fy: f64) -> Option<usize> {
+    annotations.iter().rposition(|a| match a {
+        Annotation::Arrow(a) => {
+            distance_to_segment(
+                (fx, fy),
+                (f64::from(a.x), f64::from(a.y)),
+                (f64::from(a.tip_x), f64::from(a.tip_y)),
+            ) <= 10.0
+        }
+        other => {
+            let (bx, by, bw, bh) = annotation_bbox(other);
+            fx >= bx && fx <= bx + bw && fy >= by && fy <= by + bh
+        }
+    })
 }
 
 /// The ColorButton's current color as "#RRGGBB" — the hex form all
@@ -1061,5 +1197,61 @@ mod tests {
         let (fx, fy) = widget_to_frame(70.0, 50.0, content, frame);
         let (wx, wy) = frame_to_widget(f64::from(fx), f64::from(fy), content, frame);
         assert!((wx - 70.0).abs() < 1.0 && (wy - 50.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn hit_index_finds_topmost_annotation() {
+        let make_box = |x: u32| {
+            Annotation::Box(BoxAnnotation {
+                x,
+                y: 10,
+                width: 100,
+                height: 100,
+                color: "#FF0000".to_string(),
+                thickness: 3,
+                start_ms: 0,
+                end_ms: 100,
+            })
+        };
+        let anns = vec![make_box(10), make_box(50)];
+        // (60,60) is inside both boxes; the later one draws on top.
+        assert_eq!(hit_index(&anns, 60.0, 60.0), Some(1));
+        assert_eq!(hit_index(&anns, 20.0, 20.0), Some(0));
+        assert_eq!(hit_index(&anns, 500.0, 500.0), None);
+    }
+
+    #[test]
+    fn hit_index_arrow_uses_segment_distance() {
+        let anns = vec![Annotation::Arrow(Arrow {
+            x: 10,
+            y: 10,
+            tip_x: 110,
+            tip_y: 110,
+            color: "#FF0000".to_string(),
+            thickness: 3,
+            start_ms: 0,
+            end_ms: 100,
+        })];
+        // ~2px from the diagonal shaft: inside the 10px tolerance.
+        assert_eq!(hit_index(&anns, 60.0, 63.0), Some(0));
+        // ~15px off the shaft: no hit.
+        assert_eq!(hit_index(&anns, 60.0, 81.0), None);
+    }
+
+    #[test]
+    fn hit_index_text_uses_estimated_box() {
+        let anns = vec![Annotation::Text(Text {
+            x: 100,
+            y: 100,
+            text: "bug".to_string(),
+            color: "#FFFFFF".to_string(),
+            background: "#FF0000".to_string(),
+            font_size: 20,
+            start_ms: 0,
+            end_ms: 100,
+        })];
+        // Estimated box is (100,100) + w=20*(0.6*3+1)=56, h=40.
+        assert_eq!(hit_index(&anns, 120.0, 120.0), Some(0));
+        assert_eq!(hit_index(&anns, 100.0, 200.0), None);
     }
 }
