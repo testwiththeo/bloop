@@ -148,6 +148,9 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     let drag_now: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
     // Index of the selected annotation in the vec, if any.
     let selected: Rc<Cell<Option<usize>>> = Rc::new(Cell::new(None));
+    // Set in drag_begin when the press lands on the selected
+    // annotation — the drag then moves it instead of creating.
+    let drag_moving: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     canvas.set_draw_func({
         let annotations = annotations.clone();
@@ -158,11 +161,21 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let color_button = color_button.clone();
         let thickness_spin = thickness_spin.clone();
         let selected = selected.clone();
+        let drag_moving = drag_moving.clone();
         move |_, cr, w, h| {
             let widget = (f64::from(w), f64::from(h));
             let frame = effective_frame_size(frame_size.get(), widget);
             let content = picture_content_rect(widget, frame);
             for (i, ann) in annotations.borrow().iter().enumerate() {
+                // During a move drag the selected annotation renders
+                // shifted by the live widget-space offset; the stored
+                // value is untouched until drag_end commits.
+                let _ = cr.save();
+                if drag_moving.get() && Some(i) == selected.get() {
+                    if let (Some((sx, sy)), Some((ex, ey))) = (drag_start.get(), drag_now.get()) {
+                        cr.translate(ex - sx, ey - sy);
+                    }
+                }
                 match ann {
                     Annotation::Box(b) => {
                         let (x1, y1) =
@@ -219,7 +232,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 }
                 if Some(i) == selected.get() {
                     // Selected annotation gets a dashed white border
-                    // over its normal draw.
+                    // over its normal draw — translated too, so it
+                    // tracks the preview position.
                     let (bx, by, bw, bh) = annotation_bbox(ann);
                     let (dx1, dy1) = frame_to_widget(bx, by, content, frame);
                     let (dx2, dy2) = frame_to_widget(bx + bw, by + bh, content, frame);
@@ -230,8 +244,13 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                     let _ = cr.stroke();
                     cr.set_dash(&[], 0.0);
                 }
+                let _ = cr.restore();
             }
             if let (Some((sx, sy)), Some((ex, ey))) = (drag_start.get(), drag_now.get()) {
+                // A move drag draws no new-shape preview.
+                if drag_moving.get() {
+                    return;
+                }
                 // Live shapes preview the committed picker values.
                 let tool_color = picker_hex(&color_button);
                 let thickness = thickness_spin.value();
@@ -266,10 +285,26 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     drag.connect_drag_begin({
         let drag_start = drag_start.clone();
         let drag_now = drag_now.clone();
+        let drag_moving = drag_moving.clone();
+        let annotations = annotations.clone();
+        let selected = selected.clone();
+        let frame_size = frame_size.clone();
         let canvas = canvas.clone();
         move |_, x, y| {
             drag_start.set(Some((x, y)));
             drag_now.set(Some((x, y)));
+            // Grab-for-move only when the press is inside the
+            // already-selected annotation.
+            let widget = (f64::from(canvas.width()), f64::from(canvas.height()));
+            let frame = effective_frame_size(frame_size.get(), widget);
+            let content = picture_content_rect(widget, frame);
+            let (fx, fy) = widget_to_frame(x, y, content, frame);
+            drag_moving.set(selected.get().is_some_and(|i| {
+                annotations
+                    .borrow()
+                    .get(i)
+                    .is_some_and(|a| point_hits(a, f64::from(fx), f64::from(fy)))
+            }));
             canvas.queue_draw();
         }
     });
@@ -289,6 +324,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let frame_size = frame_size.clone();
         let drag_start = drag_start.clone();
         let drag_now = drag_now.clone();
+        let drag_moving = drag_moving.clone();
         let tool_select = tool_select.clone();
         let canvas = canvas.clone();
         let window = window.clone();
@@ -313,7 +349,18 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 let hit = is_click
                     .then(|| hit_index(&annotations.borrow(), f64::from(x1), f64::from(y1)))
                     .flatten();
-                if is_click && (hit.is_some() || tool_select.selected() != 2) {
+                if drag_moving.get() && !is_click {
+                    // Move the selected annotation by the frame-space
+                    // delta; selection stays on it.
+                    let (dx, dy) = (i64::from(x2) - i64::from(x1), i64::from(y2) - i64::from(y1));
+                    if dx != 0 || dy != 0 {
+                        if let Some(i) = selected.get() {
+                            if let Some(ann) = annotations.borrow_mut().get_mut(i) {
+                                move_annotation(ann, dx, dy);
+                            }
+                        }
+                    }
+                } else if is_click && (hit.is_some() || tool_select.selected() != 2) {
                     // A click selects the topmost annotation under the
                     // point; empty space clears the selection.
                     selected.set(hit);
@@ -396,10 +443,34 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
             }
             drag_start.set(None);
             drag_now.set(None);
+            drag_moving.set(false);
             canvas.queue_draw();
         }
     });
     canvas.add_controller(drag);
+
+    // Escape discards an in-progress drag/move: clearing the drag
+    // cells drops the preview, and drag_end (if it fires at all)
+    // sees no start and commits nothing.
+    let keys = gtk4::EventControllerKey::new();
+    keys.connect_key_pressed({
+        let drag_start = drag_start.clone();
+        let drag_now = drag_now.clone();
+        let drag_moving = drag_moving.clone();
+        let canvas = canvas.clone();
+        move |_, key, _, _| {
+            if key == gtk4::gdk::Key::Escape {
+                drag_start.set(None);
+                drag_now.set(None);
+                drag_moving.set(false);
+                canvas.queue_draw();
+                gtk4::glib::Propagation::Stop
+            } else {
+                gtk4::glib::Propagation::Proceed
+            }
+        }
+    });
+    canvas.add_controller(keys);
 
     clear_button.connect_clicked({
         let annotations = annotations.clone();
@@ -856,12 +927,10 @@ fn distance_to_segment(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> f64 {
     (p.0 - cx).hypot(p.1 - cy)
 }
 
-/// Index of the topmost (last drawn) annotation under the frame-space
-/// point. Boxes, blurs, and highlights test inside their rect; arrows
-/// test distance to the shaft segment within 10px; text tests its
-/// estimated bounding box.
-fn hit_index(annotations: &[Annotation], fx: f64, fy: f64) -> Option<usize> {
-    annotations.iter().rposition(|a| match a {
+/// Whether a frame-space point hits one annotation — the same rules
+/// hit_index applies per item.
+fn point_hits(a: &Annotation, fx: f64, fy: f64) -> bool {
+    match a {
         Annotation::Arrow(a) => {
             distance_to_segment(
                 (fx, fy),
@@ -873,7 +942,50 @@ fn hit_index(annotations: &[Annotation], fx: f64, fy: f64) -> Option<usize> {
             let (bx, by, bw, bh) = annotation_bbox(other);
             fx >= bx && fx <= bx + bw && fy >= by && fy <= by + bh
         }
-    })
+    }
+}
+
+/// Index of the topmost (last drawn) annotation under the frame-space
+/// point. Boxes, blurs, and highlights test inside their rect; arrows
+/// test distance to the shaft segment within 10px; text tests its
+/// estimated bounding box.
+fn hit_index(annotations: &[Annotation], fx: f64, fy: f64) -> Option<usize> {
+    annotations.iter().rposition(|a| point_hits(a, fx, fy))
+}
+
+/// Shifts an annotation by a frame-space delta. For arrows the delta
+/// is clamped so neither endpoint drops below 0 — the shape (and its
+/// direction) is preserved; for the rest, each coordinate clamps at 0.
+fn move_annotation(a: &mut Annotation, dx: i64, dy: i64) {
+    fn shift(v: &mut u32, d: i64) {
+        *v = (*v as i64 + d).max(0) as u32;
+    }
+    match a {
+        Annotation::Box(b) => {
+            shift(&mut b.x, dx);
+            shift(&mut b.y, dy);
+        }
+        Annotation::Blur(b) => {
+            shift(&mut b.x, dx);
+            shift(&mut b.y, dy);
+        }
+        Annotation::Highlight(h) => {
+            shift(&mut h.x, dx);
+            shift(&mut h.y, dy);
+        }
+        Annotation::Text(t) => {
+            shift(&mut t.x, dx);
+            shift(&mut t.y, dy);
+        }
+        Annotation::Arrow(a) => {
+            let dx = dx.max(-i64::from(a.x.min(a.tip_x)));
+            let dy = dy.max(-i64::from(a.y.min(a.tip_y)));
+            a.x = (a.x as i64 + dx) as u32;
+            a.y = (a.y as i64 + dy) as u32;
+            a.tip_x = (a.tip_x as i64 + dx) as u32;
+            a.tip_y = (a.tip_y as i64 + dy) as u32;
+        }
+    }
 }
 
 /// The ColorButton's current color as "#RRGGBB" — the hex form all
@@ -1253,5 +1365,44 @@ mod tests {
         // Estimated box is (100,100) + w=20*(0.6*3+1)=56, h=40.
         assert_eq!(hit_index(&anns, 120.0, 120.0), Some(0));
         assert_eq!(hit_index(&anns, 100.0, 200.0), None);
+    }
+
+    #[test]
+    fn move_annotation_shifts_and_clamps() {
+        let mut boxed = Annotation::Box(BoxAnnotation {
+            x: 20,
+            y: 30,
+            width: 100,
+            height: 100,
+            color: "#FF0000".to_string(),
+            thickness: 3,
+            start_ms: 0,
+            end_ms: 100,
+        });
+        // +10/-50: y clamps at 0.
+        move_annotation(&mut boxed, 10, -50);
+        let Annotation::Box(b) = boxed else {
+            panic!("box")
+        };
+        assert_eq!((b.x, b.y), (30, 0));
+
+        // Arrow moves tail and tip by the same clamped delta: the
+        // min x is the tip (40) so dx clamps to -40, and the min y
+        // is the tip (60) so dy clamps to -60 — shape preserved.
+        let mut arrow = Annotation::Arrow(Arrow {
+            x: 100,
+            y: 100,
+            tip_x: 40,
+            tip_y: 60,
+            color: "#FF0000".to_string(),
+            thickness: 3,
+            start_ms: 0,
+            end_ms: 100,
+        });
+        move_annotation(&mut arrow, -60, -200);
+        let Annotation::Arrow(a) = arrow else {
+            panic!("arrow")
+        };
+        assert_eq!((a.x, a.y, a.tip_x, a.tip_y), (60, 40, 0, 0));
     }
 }
