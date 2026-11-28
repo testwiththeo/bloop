@@ -22,6 +22,8 @@ const TEXT_COLOR: &str = "#FFFFFF";
 const TEXT_FONT_SIZE: u32 = 14;
 const BLUR_RADIUS: u32 = 12;
 const HIGHLIGHT_OPACITY: f64 = 0.4;
+// Resize handle size in widget pixels.
+const HANDLE: f64 = 10.0;
 const MAX_FRAMES: usize = 600;
 
 type ActiveRecording = Recording<AshpdPortal, Pipeline>;
@@ -151,6 +153,9 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     // Set in drag_begin when the press lands on the selected
     // annotation — the drag then moves it instead of creating.
     let drag_moving: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // Set in drag_begin when the press lands on the resize handle of
+    // the selected annotation.
+    let drag_resizing: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     canvas.set_draw_func({
         let annotations = annotations.clone();
@@ -162,6 +167,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let thickness_spin = thickness_spin.clone();
         let selected = selected.clone();
         let drag_moving = drag_moving.clone();
+        let drag_resizing = drag_resizing.clone();
         move |_, cr, w, h| {
             let widget = (f64::from(w), f64::from(h));
             let frame = effective_frame_size(frame_size.get(), widget);
@@ -176,6 +182,17 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                         cr.translate(ex - sx, ey - sy);
                     }
                 }
+                // Resize preview: rect-style annotations grow their
+                // bottom-right corner by the live widget delta. The
+                // top-left stays fixed; the commit clamps to 1px min.
+                let grow = if drag_resizing.get() && Some(i) == selected.get() && resizable(ann) {
+                    match (drag_start.get(), drag_now.get()) {
+                        (Some((sx, sy)), Some((ex, ey))) => (ex - sx, ey - sy),
+                        _ => (0.0, 0.0),
+                    }
+                } else {
+                    (0.0, 0.0)
+                };
                 match ann {
                     Annotation::Box(b) => {
                         let (x1, y1) =
@@ -191,7 +208,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                             &b.color,
                             f64::from(b.thickness),
                             1.0,
-                            (x1, y1, x2 - x1, y2 - y1),
+                            (x1, y1, x2 - x1 + grow.0, y2 - y1 + grow.1),
                         );
                     }
                     Annotation::Arrow(a) => {
@@ -215,8 +232,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                             content,
                             frame,
                         );
-                        fill_blur_rect(cr, (x1, y1, x2 - x1, y2 - y1), 0.4);
-                        dash_stroke(cr, (x1, y1, x2 - x1, y2 - y1));
+                        fill_blur_rect(cr, (x1, y1, x2 - x1 + grow.0, y2 - y1 + grow.1), 0.4);
+                        dash_stroke(cr, (x1, y1, x2 - x1 + grow.0, y2 - y1 + grow.1));
                     }
                     Annotation::Highlight(h) => {
                         let (x1, y1) =
@@ -227,7 +244,12 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                             content,
                             frame,
                         );
-                        fill_tinted_rect(cr, &h.color, h.opacity, (x1, y1, x2 - x1, y2 - y1));
+                        fill_tinted_rect(
+                            cr,
+                            &h.color,
+                            h.opacity,
+                            (x1, y1, x2 - x1 + grow.0, y2 - y1 + grow.1),
+                        );
                     }
                 }
                 if Some(i) == selected.get() {
@@ -237,18 +259,33 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                     let (bx, by, bw, bh) = annotation_bbox(ann);
                     let (dx1, dy1) = frame_to_widget(bx, by, content, frame);
                     let (dx2, dy2) = frame_to_widget(bx + bw, by + bh, content, frame);
-                    cr.rectangle(dx1, dy1, dx2 - dx1, dy2 - dy1);
+                    let (rw, rh) = (dx2 - dx1 + grow.0, dy2 - dy1 + grow.1);
+                    cr.rectangle(dx1, dy1, rw, rh);
                     cr.set_dash(&[4.0, 4.0], 0.0);
                     cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
                     cr.set_line_width(1.5);
                     let _ = cr.stroke();
                     cr.set_dash(&[], 0.0);
+                    if resizable(ann) {
+                        // White handle at the bottom-right corner.
+                        cr.rectangle(
+                            dx1 + rw - HANDLE / 2.0,
+                            dy1 + rh - HANDLE / 2.0,
+                            HANDLE,
+                            HANDLE,
+                        );
+                        cr.set_source_rgb(1.0, 1.0, 1.0);
+                        let _ = cr.fill_preserve();
+                        cr.set_source_rgb(0.2, 0.2, 0.2);
+                        cr.set_line_width(1.0);
+                        let _ = cr.stroke();
+                    }
                 }
                 let _ = cr.restore();
             }
             if let (Some((sx, sy)), Some((ex, ey))) = (drag_start.get(), drag_now.get()) {
-                // A move drag draws no new-shape preview.
-                if drag_moving.get() {
+                // A move/resize drag draws no new-shape preview.
+                if drag_moving.get() || drag_resizing.get() {
                     return;
                 }
                 // Live shapes preview the committed picker values.
@@ -286,6 +323,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let drag_start = drag_start.clone();
         let drag_now = drag_now.clone();
         let drag_moving = drag_moving.clone();
+        let drag_resizing = drag_resizing.clone();
         let annotations = annotations.clone();
         let selected = selected.clone();
         let frame_size = frame_size.clone();
@@ -293,18 +331,28 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         move |_, x, y| {
             drag_start.set(Some((x, y)));
             drag_now.set(Some((x, y)));
-            // Grab-for-move only when the press is inside the
-            // already-selected annotation.
+            // A press on the resize handle resizes — it wins over the
+            // move grab since the handle sits inside the annotation.
             let widget = (f64::from(canvas.width()), f64::from(canvas.height()));
             let frame = effective_frame_size(frame_size.get(), widget);
             let content = picture_content_rect(widget, frame);
             let (fx, fy) = widget_to_frame(x, y, content, frame);
-            drag_moving.set(selected.get().is_some_and(|i| {
+            let resizing = selected.get().is_some_and(|i| {
                 annotations
                     .borrow()
                     .get(i)
-                    .is_some_and(|a| point_hits(a, f64::from(fx), f64::from(fy)))
-            }));
+                    .is_some_and(|a| resizable(a) && on_resize_handle(a, x, y, content, frame))
+            });
+            drag_resizing.set(resizing);
+            drag_moving.set(
+                !resizing
+                    && selected.get().is_some_and(|i| {
+                        annotations
+                            .borrow()
+                            .get(i)
+                            .is_some_and(|a| point_hits(a, f64::from(fx), f64::from(fy)))
+                    }),
+            );
             canvas.queue_draw();
         }
     });
@@ -325,6 +373,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let drag_start = drag_start.clone();
         let drag_now = drag_now.clone();
         let drag_moving = drag_moving.clone();
+        let drag_resizing = drag_resizing.clone();
         let tool_select = tool_select.clone();
         let canvas = canvas.clone();
         let window = window.clone();
@@ -349,7 +398,18 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 let hit = is_click
                     .then(|| hit_index(&annotations.borrow(), f64::from(x1), f64::from(y1)))
                     .flatten();
-                if drag_moving.get() && !is_click {
+                if drag_resizing.get() && !is_click {
+                    // Resize the selected annotation in frame space,
+                    // top-left fixed; selection stays on it.
+                    let (dx, dy) = (i64::from(x2) - i64::from(x1), i64::from(y2) - i64::from(y1));
+                    if dx != 0 || dy != 0 {
+                        if let Some(i) = selected.get() {
+                            if let Some(ann) = annotations.borrow_mut().get_mut(i) {
+                                resize_annotation(ann, dx, dy);
+                            }
+                        }
+                    }
+                } else if drag_moving.get() && !is_click {
                     // Move the selected annotation by the frame-space
                     // delta; selection stays on it.
                     let (dx, dy) = (i64::from(x2) - i64::from(x1), i64::from(y2) - i64::from(y1));
@@ -444,6 +504,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
             drag_start.set(None);
             drag_now.set(None);
             drag_moving.set(false);
+            drag_resizing.set(false);
             canvas.queue_draw();
         }
     });
@@ -457,12 +518,14 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
         let drag_start = drag_start.clone();
         let drag_now = drag_now.clone();
         let drag_moving = drag_moving.clone();
+        let drag_resizing = drag_resizing.clone();
         let canvas = canvas.clone();
         move |_, key, _, _| {
             if key == gtk4::gdk::Key::Escape {
                 drag_start.set(None);
                 drag_now.set(None);
                 drag_moving.set(false);
+                drag_resizing.set(false);
                 canvas.queue_draw();
                 gtk4::glib::Propagation::Stop
             } else {
@@ -953,6 +1016,43 @@ fn hit_index(annotations: &[Annotation], fx: f64, fy: f64) -> Option<usize> {
     annotations.iter().rposition(|a| point_hits(a, fx, fy))
 }
 
+/// Whether an annotation supports the bottom-right resize handle —
+/// Box, Blur, and Highlight only; Arrow and Text are excluded.
+fn resizable(a: &Annotation) -> bool {
+    matches!(
+        a,
+        Annotation::Box(_) | Annotation::Blur(_) | Annotation::Highlight(_)
+    )
+}
+
+/// Whether a widget-space press is on the resize handle — a
+/// HANDLE-sized square centered on the annotation's bottom-right
+/// corner.
+fn on_resize_handle(
+    a: &Annotation,
+    wx: f64,
+    wy: f64,
+    content: (f64, f64, f64, f64),
+    frame: (f64, f64),
+) -> bool {
+    let (bx, by, bw, bh) = annotation_bbox(a);
+    let (cx, cy) = frame_to_widget(bx + bw, by + bh, content, frame);
+    (wx - cx).abs() <= HANDLE / 2.0 && (wy - cy).abs() <= HANDLE / 2.0
+}
+
+/// Grows a rect-style annotation by a frame-space delta, top-left
+/// fixed, minimum 1px per side. Only called for resizable types.
+fn resize_annotation(a: &mut Annotation, dx: i64, dy: i64) {
+    let (w, h) = match a {
+        Annotation::Box(b) => (&mut b.width, &mut b.height),
+        Annotation::Blur(b) => (&mut b.width, &mut b.height),
+        Annotation::Highlight(h) => (&mut h.width, &mut h.height),
+        _ => return,
+    };
+    *w = (*w as i64 + dx).max(1) as u32;
+    *h = (*h as i64 + dy).max(1) as u32;
+}
+
 /// Shifts an annotation by a frame-space delta. For arrows the delta
 /// is clamped so neither endpoint drops below 0 — the shape (and its
 /// direction) is preserved; for the rest, each coordinate clamps at 0.
@@ -1404,5 +1504,42 @@ mod tests {
             panic!("arrow")
         };
         assert_eq!((a.x, a.y, a.tip_x, a.tip_y), (60, 40, 0, 0));
+    }
+
+    #[test]
+    fn resize_annotation_grows_and_clamps() {
+        let mut boxed = Annotation::Box(BoxAnnotation {
+            x: 20,
+            y: 30,
+            width: 100,
+            height: 100,
+            color: "#FF0000".to_string(),
+            thickness: 3,
+            start_ms: 0,
+            end_ms: 100,
+        });
+        // Top-left fixed, size follows the delta, never below 1px.
+        resize_annotation(&mut boxed, 40, -150);
+        let Annotation::Box(b) = boxed else {
+            panic!("box")
+        };
+        assert_eq!((b.x, b.y, b.width, b.height), (20, 30, 140, 1));
+
+        // Arrow and Text are not resizable — resize is a no-op.
+        let mut arrow = Annotation::Arrow(Arrow {
+            x: 10,
+            y: 10,
+            tip_x: 50,
+            tip_y: 50,
+            color: "#FF0000".to_string(),
+            thickness: 3,
+            start_ms: 0,
+            end_ms: 100,
+        });
+        resize_annotation(&mut arrow, 30, 30);
+        let Annotation::Arrow(a) = arrow else {
+            panic!("arrow")
+        };
+        assert_eq!((a.x, a.y, a.tip_x, a.tip_y), (10, 10, 50, 50));
     }
 }
